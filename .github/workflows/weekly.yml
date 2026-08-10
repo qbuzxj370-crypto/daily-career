@@ -1,0 +1,40 @@
+name: career-scout
+
+on:
+  schedule:
+    # cron은 UTC 기준. 목 22:00 UTC == 금 07:00 KST (KST = UTC+9)
+    - cron: "0 22 * * 4"
+  workflow_dispatch: {}   # 수동 실행(P5 검증)
+
+# 동시 실행 방지(중복 발행 방지 보조 — 정본 멱등은 노션 주차 조회)
+concurrency:
+  group: career-scout
+  cancel-in-progress: false
+
+jobs:
+  scout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Rule tests (판정 기준 회귀 방지)
+        run: python -m pytest tests -q
+
+      - name: Weekly scout
+        env:
+          SARAMIN_ACCESS_KEY: ${{ secrets.SARAMIN_ACCESS_KEY }}
+          DATA_GO_KR_KEY: ${{ secrets.DATA_GO_KR_KEY }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          NOTION_API_KEY: ${{ secrets.NOTION_API_KEY }}
+          NOTION_DB_ID: ${{ secrets.NOTION_DB_ID }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}   # 선택 — 미설정 시 슬랙 단계 자동 스킵
+        run: python -m src.pipeline --publish

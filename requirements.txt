@@ -1,0 +1,5 @@
+google-genai>=1.0
+python-dotenv>=1.0
+notion-client>=2.2
+httpx>=0.27          # 소스 API 호출 + slack webhook POST
+pytest>=8.0          # config/rules.py 회귀 테스트(판정 기준 보호)

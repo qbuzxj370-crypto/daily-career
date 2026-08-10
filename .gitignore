@@ -1,0 +1,5 @@
+.env
+__pycache__/
+*.pyc
+.pytest_cache/
+probe/          # P1 원본 응답 덤프(공고 원문 포함 — 커밋하지 않는다)
