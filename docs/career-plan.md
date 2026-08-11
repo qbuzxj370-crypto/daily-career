@@ -236,7 +236,7 @@ POSITIVE = {
 | 이름 | 발급처 |
 |---|---|
 | `SARAMIN_ACCESS_KEY` | 사람인 오픈API 신청 (무료) |
-| `DATA_GO_KR_KEY` | 공공데이터포털 고용24 채용정보 API 활용신청 (무료) |
+| ~~`DATA_GO_KR_KEY`~~ | **불필요 (2026-08-10)** — 고용24 OPEN-API는 기업회원 전용이라 개인은 발급받아도 못 쓴다. 워크넷은 공개 페이지 파싱으로 전환 |
 | `GEMINI_API_KEY` | Google AI Studio — **daily-recall 것 재사용 가능** |
 | `NOTION_API_KEY` | Notion 내부 통합 — **daily-recall 통합 재사용 가능** |
 | `NOTION_DB_ID` | `--init-db`로 새로 생성 (daily-recall과 별도 DB) |

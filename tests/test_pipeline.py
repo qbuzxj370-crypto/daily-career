@@ -138,6 +138,26 @@ def test_batch_failure_falls_back_to_individual_calls():
     assert forced and all(out[k].verdict == "위험" for k in forced)
 
 
+def test_quota_exhaustion_skips_individual_retries():
+    """일일 할당량이 끝났으면 개별 재시도는 전부 실패가 확정이다 — 쏘지 말고 다음 모델로.
+
+    무료 티어는 모델당 하루 20요청이라, 한 배치가 10번씩 헛호출을 하면 남은 배치가
+    쓸 quota까지 없어진다.
+    """
+    jobs = _mock_jobs()[:4]
+    sigs = signals.analyze_all(jobs)
+    sizes = []
+
+    def call(model, prompt):
+        sizes.append(prompt.count("- source_key:"))
+        raise RuntimeError("429 RESOURCE_EXHAUSTED: quota exceeded")
+
+    out = evaluator.evaluate(jobs, sigs, call=call, batch_size=4)
+    assert len(out) == 4 and all(v.by_rule and v.llm_failed for v in out.values())
+    # 모델 체인 길이만큼만 호출됐다 — 건별 재시도는 한 번도 없었다.
+    assert sizes == [4, 4] and 1 not in sizes
+
+
 def test_llm_total_failure_falls_back_to_rule_verdict():
     jobs = _mock_jobs()[:2]
     sigs = signals.analyze_all(jobs)

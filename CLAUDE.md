@@ -17,7 +17,7 @@ session trusts it.
 ## Status: P2–P5 implemented, P1 still open
 
 `docs/career-plan.md` is the spec. P2 (collect/normalize/signals), P3 (LLM judgement), P4 (Notion publish +
-dedup), and P5 (Slack + schedule) are implemented and covered by `tests/` (69 tests, offline). `--mock`
+dedup), and P5 (Slack + schedule) are implemented and covered by `tests/` (95 tests, offline). `--mock`
 runs the whole collector→signals→evaluate→render path with no keys.
 
 **P1 is not done and cannot be done without the user's API keys.** The `FIELDS` tables in
@@ -61,9 +61,14 @@ python -m src.pipeline --mock                         # offline path check, no A
 python -m src.pipeline --dry-run                      # real collect + judge, no Notion write
 python -m src.pipeline --dry-run --no-llm             # collect + regex signals only (zero LLM cost)
 python -m src.pipeline --publish                      # real publish (week-idempotent)
+python -m src.pipeline --purge                        # archive pages older than 3 ISO weeks
 python -m src.pipeline --init-db --parent-page <ID>   # one-time: create the Notion DB
 python -m pytest tests -q                             # rules + orchestration invariants
 ```
+
+`--no-prescreen` skips the title prescreen (everything collected gets judged and published);
+`--no-purge` skips the retention sweep `--publish` runs first; `--keep-weeks N` overrides how
+many ISO weeks survive that sweep.
 
 `--role <slug>` narrows to one role, `--week 2026-W33` pins the ISO week. Follow daily-recall's
 convention: `--mock` is the offline smoke test and runs the full collector→signals→evaluate→render path
@@ -71,23 +76,27 @@ from `_mock_jobs()` with no key set (and never calls the LLM). `--dry-run --no-l
 project and exists so regex rule changes can be iterated for free.
 
 Secrets: `.env` locally, GitHub Actions Secrets in CI —
-`SARAMIN_ACCESS_KEY`, `DATA_GO_KR_KEY`, `GEMINI_API_KEY`, `NOTION_API_KEY`, `NOTION_DB_ID` (required),
-`SLACK_WEBHOOK_URL` (optional). `GEMINI_API_KEY` and `NOTION_API_KEY` can be the same values daily-recall
+`SARAMIN_ACCESS_KEY`, `GEMINI_API_KEY`, `NOTION_API_KEY`, `NOTION_DB_ID` (required),
+`SLACK_WEBHOOK_URL` (optional). **워크넷 needs no key** — it is scraped, not called. `GEMINI_API_KEY` and `NOTION_API_KEY` can be the same values daily-recall
 uses; `NOTION_DB_ID` must be a **separate DB**. Never commit `.env` or a webhook URL — the URL itself is
 the secret. Schedule is `.github/workflows/weekly.yml`, cron `0 22 * * 4` UTC = **Fri 07:00 KST**.
 
 ## Pipeline architecture
 
-`src/pipeline.py` orchestrates 7 stages, each a separate module:
+`src/pipeline.py` orchestrates 9 stages, each a separate module:
 
+0. **purge** (`state.py`) — archive pages older than `PURGE_KEEP_WEEKS` ISO weeks. Runs first, and a
+   failure here never blocks the publish.
 1. **idempotency** (`state.py`) — already collected this ISO week? → exit.
 2. **collector** (`collector.py` + `sources/`) — call each source per role keyword, normalize to `JobPosting`,
    drop intra-run duplicates.
 3. **dedup** (`state.py`) — fetch **all** existing `SourceKey`s from Notion in one paginated sweep, filter in memory.
 4. **signals** (`signals.py` + `config/rules.py`) — regex extraction of risk/bonus signals. *Code decides here.*
-5. **evaluator** (`evaluator.py`) — Gemini JSON mode, batched, signals injected as prompt hints.
-6. **notion_pub** (`notion_pub.py`) — one posting = one page.
-7. **slack_pub** (`slack_pub.py`) — weekly digest.
+5. **prescreen** (`prescreen.py`) — company + title only, ~60 per call. What it drops is **never judged and
+   never written to Notion**.
+6. **evaluator** (`evaluator.py`) — Gemini JSON mode, batched, signals injected as prompt hints.
+7. **notion_pub** (`notion_pub.py`) — one posting = one page.
+8. **slack_pub** (`slack_pub.py`) — weekly digest.
 
 Build the publish flow dependency-injected like `../daily-recall/src/pipeline.py:41` (state, collect_fn,
 evaluate_fn, publisher, slack_fn passed in) so orchestration is verifiable without live APIs.
@@ -119,18 +128,40 @@ evaluate_fn, publisher, slack_fn passed in) so orchestration is verifiable witho
 - **`Status` is a human column.** The pipeline sets it to `신규` at creation and **must never update an
   existing page.** The user hand-manages 검토중/지원/보류/탈락 there; a "sync" or "refresh existing pages"
   feature would silently erase their triage work. Publishing is create-only.
+  The one write that touches an existing page is the retention sweep (`state.purge_before`), and it is
+  bounded by the same concern: **it archives only pages still at `신규`.** Age is a necessary condition
+  for cleanup, never a sufficient one — a posting the user already applied to does not get deleted for
+  being old. Week comparison is lexicographic on `YYYY-Www`, which is chronological because of the
+  zero-padding; `test_week_strings_compare_chronologically` pins that.
+
+- **The title prescreen is the only stage that makes a posting disappear.** Anything it drops is never
+  judged and never reaches Notion, so two rules hold it in place (`tests/test_prescreen.py`):
+  rule-forced 위험 is dropped by *code* without asking the model, and **LLM failure fails open** — a
+  broken batch passes through to full judgement rather than vanishing. Losing a week of job leads to a
+  429 is much worse than paying for a few extra judgements. Its prompt gets company + title only; if
+  `raw_text` leaks in, the stage has no reason to exist.
 
 - **Notion 2025-09 API uses data sources.** Pages are created against a `data_source_id`, not a database id
   — reuse `resolve_data_source_id()` at `../daily-recall/src/state.py:51` and the "missing select option"
   400 absorber at `../daily-recall/src/state.py:38`.
 
-- **Official APIs only. No scraping.** 사람인 오픈 API and 공공데이터포털(고용24) both return JSON with a free
-  key. This is a deliberate constraint, not a temporary shortcut — do not add an HTML scraper as a
-  "fallback" when an API field is missing.
+- **사람인 = official API. 워크넷 = HTML scrape. The split is deliberate and robots.txt decides it.**
+  The original "official APIs only" rule was overturned on 2026-08-10 for 워크넷 only, because
+  **고용24 OPEN-API is 기업회원 전용** — its own intro page says so, and a real call with a valid key
+  returns `개인회원은 사용할 수 없는 OPEN-API입니다`. data.go.kr delegates that dataset back to 고용24,
+  so no API path exists for a personal account. Before scraping anything, **check robots.txt**:
+  work24.go.kr is `Allow: /` (so `/wk/a/b/1200/...`, which is also in its sitemap, is fair game) while
+  saramin.co.kr has `Disallow: /zf_user/recruit/` — so 사람인 must stay on its API and **must never be
+  scraped**. `/cm/f/c/0100/selectUnifySearchPost.do` (work24 통합검색) is explicitly disallowed too.
 
-- **LLM calls are batched.** ~40 postings individually would hit the free-tier RPM limit. Judge in batches of
-  `EVAL_BATCH_SIZE` (10) returning an array; on batch failure, retry that batch as individual calls, then
-  fall back to `MODEL_FALLBACK`.
+- **LLM calls are batched, and the free tier's real ceiling is daily, not per-minute.** Measured
+  2026-08-10 from the 429 body: **20 requests per day per model** (`gemini-2.5-flash` and
+  `gemini-2.5-flash-lite` each get their own 20). Waiting does not clear it. Judge in batches of
+  `EVAL_BATCH_SIZE` (10) returning an array; on batch failure, retry that batch as individual calls,
+  then fall back to `MODEL_FALLBACK`. **Exception: on 429/RESOURCE_EXHAUSTED, skip the individual
+  retries** — they are certain to fail and would burn 10 more of the day's 20 requests
+  (`evaluator._is_quota_exhausted`). This budget is why the prescreen exists: 144 postings cost 15
+  requests to judge outright, versus 3 to prescreen plus a few for the survivors.
 
 - **Slack is a secondary notification.** Its exceptions are swallowed; a Slack failure never invalidates a
   successful Notion publish. On total collect/publish failure, write a `Kind=error` page and re-raise so the
@@ -151,19 +182,27 @@ evaluate_fn, publisher, slack_fn passed in) so orchestration is verifiable witho
 
 ## P1 gates the source mappings
 
-`--probe` against both real APIs, dumping raw responses to `probe/`, is what pins the field mappings.
-Do not derive them from API docs alone; docs diverge from actual responses often enough that anything
-built on documentation is likely to be rewritten. `run_probe()` prints the extracted `JobPosting` and a
-list of **empty fields** — an empty field means that source's `FIELDS` candidate paths are wrong.
+`--probe`, dumping raw responses to `probe/`, is what pins the field mappings. Do not derive them from
+docs alone; docs diverge from actual responses often enough that anything built on documentation is
+likely to be rewritten. `run_probe()` prints the extracted `JobPosting` and a list of **empty fields**.
 
-Both clients keep the endpoint and parameters env-overridable (`SARAMIN_API_URL`, `WORKNET_API_URL`,
-`WORKNET_AUTH_PARAM`, `WORKNET_EXTRA_PARAMS`) because 워크넷 in particular differs between the
-work.go.kr endpoint (`authKey`, XML) and the data.go.kr passthrough (`serviceKey`).
+**워크넷 is done** (2026-08-10) — mapping verified against the live page, and `tests/test_sources.py`
+now carries two real result rows as its fixture. **사람인 is not** — its `FIELDS` table is still a
+doc-derived assumption and its fixture is invented. A green `test_sources.py` proves the 워크넷 mapping
+and only the 사람인 *parser shape*.
 
-⚠️ **Known limitation, do not paper over it.** 사람인's search API returns metadata only — no company
-headcount and no posting body. So "소기업 · 오너 1인" is caught only when the wording says it outright
-(`1인 전산`, `대표 직속`), and text-based signals like `3교대` only fire if they appear in the title,
-industry, or keyword fields. `Verdict.company_size` therefore carries `판단 불가`, rendered in the page
+Two 워크넷 details that cost hours to find and will not be re-derivable from the page source:
+**`searchMode=Y` is mandatory** — without it the keyword is silently ignored and you get the unfiltered
+latest list (which looks like a working search until you read the titles). And the per-row anchor is the
+compare-checkbox `value`, which packs `공고번호|정보구분|회사명|공고제목` in one attribute. Endpoints stay
+env-overridable (`SARAMIN_API_URL`, `WORKNET_SEARCH_URL`) since work24 has already moved once.
+
+⚠️ **Known limitation, do not paper over it.** Neither source gives company headcount or the posting
+body. 사람인's search API returns metadata only; 워크넷's list rows carry 급여·경력·학력·근무형태·지역
+but no 사원수 and no 본문. So "소기업 · 오너 1인" is caught only when the wording says it outright
+(`1인 전산`, `대표 직속`), and text-based signals like `3교대` only fire if they appear in the fields
+that are listed. (워크넷 does surface 근무형태 — `주5일`, `08:30 ~ 19:30` — which is why "주간 중심"
+fires reliably there and rarely on 사람인.) `Verdict.company_size` therefore carries `판단 불가`, rendered in the page
 body as "공고에 정보 없음 — 직접 확인 필요". Do not guess confidently, and do not quietly drop the criterion.
 
 ## Tests
@@ -178,7 +217,12 @@ body as "공고에 정보 없음 — 직접 확인 필요". Do not guess confide
   signal names are dropped, page body has no markdown table, every written property exists in the schema.
 - `test_state.py` — bulk `SourceKey` sweep paginates (not one query per posting), `week_exists` stops
   after one row.
-- `test_sources.py` — parser shape only. **Its fixtures are assumptions, not real responses** (see P1).
+- `test_sources.py` — 워크넷 fixture is a real response and pins that mapping plus the three filter
+  params; the **사람인 fixture is still an assumption** (see P1).
+- `test_prescreen.py` — rule-forced 위험 is dropped without an LLM call, LLM failure keeps the whole
+  batch, the prompt carries no `raw_text`, and a screened-out job is never published.
+- `test_state.py` — also covers the retention sweep: only weeks before the cutoff, never a page whose
+  `Status` the user changed, never a page whose week is unreadable.
 
 ## Reuse from daily-recall (do not rewrite)
 
@@ -195,9 +239,19 @@ body as "공고에 정보 없음 — 직접 확인 필요". Do not guess confide
 ## Tuning constants
 
 `config/settings.py`: `MODEL` / `MODEL_FALLBACK` (`gemini-2.5-flash` / `gemini-2.5-flash-lite`, env
-overridable), `EVAL_BATCH_SIZE=10`, `MAX_JOBS_PER_ROLE=30`, `SLACK_TOP_N=5`, `ROLE_PRIORITY`
-(`cloud`, `public_it` first), `SEND_SLACK = bool(SLACK_WEBHOOK_URL)`.
+overridable), `EVAL_BATCH_SIZE=10`, `PRESCREEN_BATCH_SIZE=60`, `MAX_JOBS_PER_ROLE=30`, `SLACK_TOP_N=5`,
+`ROLE_PRIORITY` (`cloud`, `public_it` first), `SEND_SLACK = bool(SLACK_WEBHOOK_URL)`,
+`PRESCREEN` (`CS_PRESCREEN=0` disables), `PURGE_KEEP_WEEKS=3` (`CS_PURGE_KEEP_WEEKS`).
 `config/roles.py` owns the 5 role slugs; `config/rules.py` owns the `RISK` / `POSITIVE` regex sets.
+
+**워크넷 search filters** (`WORKNET_CAREER_TYPES=N,Z`, `WORKNET_ACADEMIC_GBN=00,04`,
+`WORKNET_REG_DAYS=7`) narrow the search server-side before anything else runs. The codes and their
+measured effect are tabulated in `docs/ref.md` §7(1); three details bite if you touch them: the
+server reads `careerTypes` (plural) and ignores the checkbox's own `careerType`; `regDateStdt`/
+`regDateEndt` must be `YYYYMMDD` or the result list comes back **empty**; and `termSearchGbn=W-1`
+is a UI button state the server ignores, so the dates must be computed. The defaults include
+학력무관/경력무관 on purpose — most 워크넷 postings are registered that way, and filtering to
+`04`/`N` alone drops the majority of postings the user actually qualifies for (614 → 72).
 
 Regex rules in `config/rules.py` are the one part of this project that **must keep real tests** — they are
 pure functions over strings, they encode the user's actual criteria, and a silently broken pattern turns a

@@ -129,25 +129,32 @@ def build_prompt(jobs: list[JobPosting], sigs: dict[str, SignalResult]) -> str:
 
 # ---------------------------------------------------------------- LLM 호출
 
-def _call_gemini(model: str, prompt: str) -> str:
-    from google import genai  # 지연 import: --mock/--no-llm 경로는 미설치여도 동작
-    from google.genai import types
+def make_gemini_call(system_prompt: str, schema: dict[str, Any],
+                     max_tokens: int) -> CallFn:
+    """(system, schema)를 고정한 CallFn 생성. 프리스크린이 같은 호출 경로를 재사용한다."""
+    def _call(model: str, prompt: str) -> str:
+        from google import genai  # 지연 import: --mock/--no-llm 경로는 미설치여도 동작
+        from google.genai import types
 
-    client = genai.Client(api_key=settings.GEMINI_API_KEY)
-    resp = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_PROMPT,
-            max_output_tokens=settings.MAX_TOKENS,
-            response_mime_type="application/json",
-            response_schema=RESPONSE_SCHEMA,
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
-        ),
-    )
-    if not resp.text:
-        raise EvaluationError("Gemini 응답이 비어 있음(차단/토큰초과 가능)")
-    return resp.text
+        client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        resp = client.models.generate_content(
+            model=model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                max_output_tokens=max_tokens,
+                response_mime_type="application/json",
+                response_schema=schema,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
+            ),
+        )
+        if not resp.text:
+            raise EvaluationError("Gemini 응답이 비어 있음(차단/토큰초과 가능)")
+        return resp.text
+    return _call
+
+
+_call_gemini = make_gemini_call(SYSTEM_PROMPT, RESPONSE_SCHEMA, settings.MAX_TOKENS)
 
 
 def _model_chain() -> list[str]:
@@ -285,6 +292,19 @@ def _sig(sigs: dict[str, SignalResult], job: JobPosting) -> SignalResult:
     return sigs.get(job.source_key, SignalResult())
 
 
+def _is_quota_exhausted(e: Exception) -> bool:
+    """일일/분당 할당량 소진 오류인가.
+
+    무료 티어는 **모델당 하루 20요청**이다(2026-08-10 실측: 429 RESOURCE_EXHAUSTED,
+    quotaId=GenerateRequestsPerDayPerProjectPerModel-FreeTier, limit 20 — flash와
+    flash-lite가 각각 20). 이 상태에서 개별 재시도를 돌리면 확실히 실패할 호출을 10번
+    더 쏘면서 시간만 쓴다. 파싱 실패 같은 다른 오류와 달리 개별 호출로 나눈다고 풀리는
+    문제가 아니므로, 이 모델은 접고 바로 다음 모델로 넘어간다.
+    """
+    text = str(e)
+    return "RESOURCE_EXHAUSTED" in text or "429" in text
+
+
 def _judge_group(batch: list[JobPosting], sigs: dict[str, SignalResult],
                  call: CallFn, log) -> dict[str, Verdict]:
     """배치 1개 판정. 배치 실패 → 개별 재시도 → 폴백 모델 → 규칙 판정."""
@@ -297,6 +317,10 @@ def _judge_group(batch: list[JobPosting], sigs: dict[str, SignalResult],
             got.update(_parse(call(model, build_prompt(pending, sigs)), pending))
             continue
         except Exception as e:  # noqa: BLE001 — 배치 실패는 개별 호출로 격하
+            if _is_quota_exhausted(e):
+                log(f"  [경고] {model} 할당량 소진({len(pending)}건) — 개별 재시도를 건너뛰고"
+                    f" 다음 모델로: {e}")
+                continue
             log(f"  [경고] 배치 판정 실패({model}, {len(pending)}건): {type(e).__name__}: {e}"
                 f" → 개별 호출로 재시도")
         for job in [j for j in batch if j.source_key not in got]:

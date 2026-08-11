@@ -5,6 +5,7 @@
   python -m src.pipeline --dry-run                      # 실제 수집·판정, 노션 미발행(stdout)
   python -m src.pipeline --dry-run --no-llm             # 수집+규칙 신호만 (LLM 비용 0)
   python -m src.pipeline --publish                      # 실제 발행 (주차 멱등)
+  python -m src.pipeline --purge                        # 오래된 주차 페이지만 정리
   python -m src.pipeline --init-db --parent-page <ID>   # 최초 1회 노션 DB 생성
 """
 from __future__ import annotations
@@ -13,10 +14,10 @@ import sys
 from pathlib import Path
 
 from config import roles, settings
-from src import collector, evaluator, renderer, signals
+from src import collector, evaluator, prescreen, renderer, signals
 from src.evaluator import Verdict
 from src.sources.base import JobPosting, SourceError
-from src.state import NotionState, State, iso_week
+from src.state import NotionState, State, iso_week, purge_cutoff
 
 PROBE_DIR = Path(__file__).resolve().parent.parent / "probe"
 
@@ -79,11 +80,27 @@ def _pair(jobs: list[JobPosting], verdicts: dict[str, Verdict]) -> list[tuple[Jo
     return [(job, verdicts[job.source_key]) for job in jobs if job.source_key in verdicts]
 
 
-def collect_and_judge(sources, role_slugs, *, use_llm: bool, log=print):
-    """수집 → 신호 → 판정. (jobs, sigs, verdicts) 반환."""
+def screen(jobs: list[JobPosting], *, use_llm: bool, enabled: bool | None = None,
+           log=print) -> tuple[list[JobPosting], dict[str, signals.SignalResult]]:
+    """신호 추출 + 제목 프리스크린. (남길 공고, 전체 신호) 반환.
+
+    신호는 **버려진 건까지 포함해** 전부 계산한다 — 프리스크린이 규칙 확정 위험을
+    먼저 걸러내려면 그 값이 먼저 있어야 한다.
+    """
+    sigs = signals.analyze_all(jobs)
+    if not (settings.PRESCREEN if enabled is None else enabled):
+        return jobs, sigs
+    kept, dropped = prescreen.prescreen(jobs, sigs, use_llm=use_llm, log=log)
+    log(prescreen.summary(kept, dropped))
+    return kept, sigs
+
+
+def collect_and_judge(sources, role_slugs, *, use_llm: bool,
+                      use_prescreen: bool | None = None, log=print):
+    """수집 → 신호 → 프리스크린 → 판정. (jobs, sigs, verdicts) 반환."""
     jobs = collector.sort_for_output(collector.collect(sources, role_slugs, log=log))
     log(f"수집 {len(jobs)}건 (중복 제거 후)")
-    sigs = signals.analyze_all(jobs)
+    jobs, sigs = screen(jobs, use_llm=use_llm, enabled=use_prescreen, log=log)
     verdicts = evaluator.evaluate(jobs, sigs, use_llm=use_llm, log=log)
     return jobs, sigs, verdicts
 
@@ -91,16 +108,25 @@ def collect_and_judge(sources, role_slugs, *, use_llm: bool, log=print):
 # ---------------------------------------------------------------- 발행 경로
 
 def _publish_flow(state: State, *, week: str, collect_fn, evaluate_fn,
-                  publisher, error_publisher, slack_fn=None, db_url: str = "",
-                  log=print) -> str:
+                  publisher, error_publisher, slack_fn=None, screen_fn=None,
+                  purge_weeks: int | None = None, db_url: str = "", log=print) -> str:
     """발행 오케스트레이션(주입 가능 — 실제 API 없이 검증 가능).
 
+    0) 보관 기간 정리: purge_weeks가 주어지면 그보다 오래된 주차 페이지를 먼저 치운다.
+       실패해도 발행을 막지 않는다(정리는 보조 작업이다).
     1) 주차 멱등: 이번 ISO 주차에 이미 발행됐으면 아무것도 하지 않는다.
     2) SourceKey 중복 제거: 이전 주차에 이미 본 공고는 다시 만들지 않는다(멱등 레이어 2).
-    3) 수집/판정 자체가 실패하면 error 페이지를 남기고 예외 전파(스케줄러가 실패로 인지).
-    4) 개별 페이지 생성 실패는 나머지 발행을 막지 않는다. 끝난 뒤 error 페이지 + 예외.
-    5) 슬랙은 보조 알림 — 실패해도 발행 성공을 무효화하지 않는다.
+    3) 프리스크린: screen_fn이 버린 공고는 **판정도 발행도 하지 않는다**(노션에 안 남는다).
+    4) 수집/판정 자체가 실패하면 error 페이지를 남기고 예외 전파(스케줄러가 실패로 인지).
+    5) 개별 페이지 생성 실패는 나머지 발행을 막지 않는다. 끝난 뒤 error 페이지 + 예외.
+    6) 슬랙은 보조 알림 — 실패해도 발행 성공을 무효화하지 않는다.
     """
+    if purge_weeks:
+        try:
+            state.purge_before(purge_cutoff(week, purge_weeks), log=log)
+        except Exception as e:  # noqa: BLE001 — 정리 실패가 이번 주 발행을 막을 이유는 없다
+            log(f"  [경고] 오래된 페이지 정리 실패(무시): {type(e).__name__}: {e}")
+
     if state.week_exists(week):
         return f"[skip] {week} 이미 수집됨 — 주차 멱등 스킵"
 
@@ -111,6 +137,10 @@ def _publish_flow(state: State, *, week: str, collect_fn, evaluate_fn,
         log(f"신규 {len(new_jobs)}건 (기존 SourceKey {len(known)}건과 대조)")
         if not new_jobs:
             return f"[skip] {week} 신규 공고 0건 — 발행 없음"
+        if screen_fn is not None:
+            new_jobs = screen_fn(new_jobs)
+            if not new_jobs:
+                return f"[skip] {week} 프리스크린 통과 0건 — 발행 없음"
         sigs, verdicts = evaluate_fn(new_jobs)
     except Exception as e:  # noqa: BLE001
         error_publisher(f"{type(e).__name__}: {e}", week)
@@ -145,9 +175,10 @@ def _publish_flow(state: State, *, week: str, collect_fn, evaluate_fn,
 # ---------------------------------------------------------------- 실행 모드
 
 def run_offline(*, mock: bool, use_llm: bool, role_slugs: list[str] | None,
-                week: str, log=print) -> str:
+                week: str, use_prescreen: bool | None = None, log=print) -> str:
     sources = [MockSource()] if mock else None
-    jobs, sigs, verdicts = collect_and_judge(sources, role_slugs, use_llm=use_llm, log=log)
+    jobs, sigs, verdicts = collect_and_judge(sources, role_slugs, use_llm=use_llm,
+                                             use_prescreen=use_prescreen, log=log)
     results = _pair(jobs, verdicts)
 
     out: list[str] = []
@@ -158,7 +189,9 @@ def run_offline(*, mock: bool, use_llm: bool, role_slugs: list[str] | None,
     return "\n".join(out)
 
 
-def run_publish(*, use_llm: bool, role_slugs: list[str] | None, week: str, log=print) -> str:
+def run_publish(*, use_llm: bool, role_slugs: list[str] | None, week: str,
+                purge: bool = True, use_prescreen: bool | None = None,
+                keep_weeks: int | None = None, log=print) -> str:
     from src import notion_pub
     slack_fn = None
     if settings.SEND_SLACK:
@@ -168,16 +201,29 @@ def run_publish(*, use_llm: bool, role_slugs: list[str] | None, week: str, log=p
     def collect_fn():
         return collector.sort_for_output(collector.collect(None, role_slugs, log=log))
 
+    def screen_fn(jobs):
+        return screen(jobs, use_llm=use_llm, enabled=use_prescreen, log=log)[0]
+
     def evaluate_fn(jobs):
         sigs = signals.analyze_all(jobs)
         return sigs, evaluator.evaluate(jobs, sigs, use_llm=use_llm, log=log)
 
     return _publish_flow(
         NotionState(), week=week,
-        collect_fn=collect_fn, evaluate_fn=evaluate_fn,
+        collect_fn=collect_fn, evaluate_fn=evaluate_fn, screen_fn=screen_fn,
+        purge_weeks=(keep_weeks or settings.PURGE_KEEP_WEEKS) if purge else None,
         publisher=notion_pub.publish, error_publisher=notion_pub.publish_error,
         slack_fn=slack_fn, db_url=notion_pub.database_url(), log=log,
     )
+
+
+def run_purge(week: str, keep_weeks: int | None = None, log=print) -> str:
+    """오래된 주차 페이지만 정리(발행 없이). --purge 전용."""
+    cutoff = purge_cutoff(week, keep_weeks)
+    purged, held = NotionState().purge_before(cutoff, log=log)
+    return (f"[purge] {cutoff} 이전 {purged}건 보관"
+            + (f" · Status가 '신규'가 아니라 남긴 것 {held}건" if held else "")
+            + f" (최근 {keep_weeks or settings.PURGE_KEEP_WEEKS}개 주차 유지)")
 
 
 def run_probe(source_name: str, role_slug: str, log=print) -> int:
@@ -235,6 +281,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--dry-run", action="store_true", help="실제 수집·판정, 노션 미발행")
     p.add_argument("--no-llm", action="store_true", help="LLM 미호출, 규칙 신호만(비용 0)")
     p.add_argument("--publish", action="store_true", help="노션에 실제 발행(주차 멱등)")
+    p.add_argument("--purge", action="store_true",
+                   help=f"오래된 주차 페이지만 정리(최근 {settings.PURGE_KEEP_WEEKS}주 유지). "
+                        "Status가 '신규'가 아닌 페이지는 건드리지 않는다")
+    p.add_argument("--no-purge", action="store_true",
+                   help="--publish 시작 시 자동 정리를 건너뛴다")
+    p.add_argument("--no-prescreen", action="store_true",
+                   help="제목 프리스크린 없이 수집된 전부를 본판정·발행한다")
+    p.add_argument("--keep-weeks", type=int, default=None,
+                   help=f"보관할 주차 수(기본 {settings.PURGE_KEEP_WEEKS}, 이번 주 포함)")
     p.add_argument("--init-db", action="store_true", help="Notion DB를 스키마대로 생성(최초 1회)")
     p.add_argument("--parent-page", default=None,
                    help="--init-db: DB를 만들 부모 페이지 id(통합에 공유 필요)")
@@ -271,23 +326,35 @@ def main(argv: list[str] | None = None) -> int:
     if args.probe:
         return run_probe(args.probe, args.role or "cloud")
 
+    if args.purge:
+        try:
+            print(run_purge(week, args.keep_weeks))
+        except Exception as e:  # noqa: BLE001
+            print(f"정리 실패: {type(e).__name__}: {e}", file=sys.stderr)
+            return 1
+        return 0
+
     if not (args.dry_run or args.mock or args.publish):
-        print("--probe | --mock | --dry-run | --publish | --init-db 중 하나 필요",
+        print("--probe | --mock | --dry-run | --publish | --purge | --init-db 중 하나 필요",
               file=sys.stderr)
         return 2
 
+    use_prescreen = False if args.no_prescreen else None
     try:
         if args.publish:
-            print(run_publish(use_llm=not args.no_llm, role_slugs=role_slugs, week=week))
+            print(run_publish(use_llm=not args.no_llm, role_slugs=role_slugs, week=week,
+                              purge=not args.no_purge, use_prescreen=use_prescreen,
+                              keep_weeks=args.keep_weeks))
             return 0
         # --mock은 키가 없는 오프라인 경로이므로 LLM도 호출하지 않는다.
         use_llm = not (args.no_llm or args.mock)
-        print(run_offline(mock=args.mock, use_llm=use_llm, role_slugs=role_slugs, week=week))
+        print(run_offline(mock=args.mock, use_llm=use_llm, role_slugs=role_slugs, week=week,
+                          use_prescreen=use_prescreen))
         return 0
     except collector.CollectError as e:
         print(f"\n수집 실패 — 공고를 한 건도 가져오지 못했습니다.\n{e}\n"
-              "→ .env의 SARAMIN_ACCESS_KEY / DATA_GO_KR_KEY를 확인하고, "
-              "키 발급 후 `--probe`로 응답을 먼저 확인하세요.", file=sys.stderr)
+              "→ 사람인은 .env의 SARAMIN_ACCESS_KEY를 확인하고, 워크넷은 키가 없으니 "
+              "`--probe worknet`으로 페이지 구조가 바뀌지 않았는지 확인하세요.", file=sys.stderr)
         return 1
 
 

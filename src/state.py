@@ -6,10 +6,13 @@
 둘 중 하나를 제거하면 나머지가 우회되는 순간 중복 페이지가 생긴다.
 """
 from __future__ import annotations
+import re
 from abc import ABC, abstractmethod
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from config import settings
+
+_WEEK_RE = re.compile(r"^\d{4}-W\d{2}$")
 
 
 class State(ABC):
@@ -17,6 +20,10 @@ class State(ABC):
     def week_exists(self, week: str) -> bool: ...
     @abstractmethod
     def known_source_keys(self) -> set[str]: ...
+
+    def purge_before(self, cutoff_week: str, *, log=print) -> tuple[int, int]:
+        """오래된 주차 페이지 정리. 기본은 아무것도 하지 않는다(노션 미연동 상태 구현용)."""
+        return (0, 0)
 
 
 class EmptyState(State):
@@ -88,6 +95,11 @@ class NotionState(State):
         rt = page.get("properties", {}).get(prop, {}).get("rich_text", [])
         return "".join(seg.get("plain_text", "") for seg in rt)
 
+    @staticmethod
+    def _select(page: dict, prop: str) -> str:
+        sel = page.get("properties", {}).get(prop, {}).get("select") or {}
+        return sel.get("name", "")
+
     def week_exists(self, week: str) -> bool:
         """이번 주차에 발행된 job 페이지가 1건이라도 있으면 True."""
         try:
@@ -111,12 +123,66 @@ class NotionState(State):
             raise
         return {k for k in (self._rich_text(p, "SourceKey") for p in pages) if k}
 
+    def purge_before(self, cutoff_week: str, *, log=print) -> tuple[int, int]:
+        """`cutoff_week`보다 오래된 주차의 페이지를 보관(archive)한다. (정리, 보존) 반환.
+
+        **`Status`가 '신규'가 아닌 페이지는 절대 건드리지 않는다.** Status는 사람이 손으로
+        관리하는 열이고(검토중/지원/보류/탈락), 지원까지 한 공고를 나이 때문에 지워버리면
+        사용자의 분류 작업이 사라진다. 나이는 정리의 필요조건일 뿐 충분조건이 아니다.
+
+        발행이 create-only인 것과 모순되지 않는다 — 저쪽은 "판정 결과로 기존 페이지를
+        덮어쓰지 않는다"는 뜻이고, 이건 사용자가 명시적으로 요청한 별도의 정리 동작이다.
+
+        비교는 `YYYY-Www` 문자열의 사전순으로 한다(0 패딩이라 시간순과 일치).
+        CollectedWeek이 비었거나 형식이 다르면 판단하지 않고 남긴다.
+        """
+        try:
+            pages = self._query({"property": "Kind", "select": {"equals": "job"}})
+            pages += self._query({"property": "Kind", "select": {"equals": "error"}})
+        except Exception as e:  # noqa: BLE001
+            if _is_missing_select_option(e):
+                return (0, 0)
+            raise
+
+        purged = held = 0
+        for page in pages:
+            week = self._rich_text(page, "CollectedWeek").strip()
+            if not _WEEK_RE.match(week) or week >= cutoff_week:
+                continue
+            status = self._select(page, "Status")
+            if status and status != "신규":
+                held += 1
+                continue
+            self.client.pages.update(page_id=page["id"], archived=True)
+            purged += 1
+        if purged or held:
+            log(f"  정리: {cutoff_week} 이전 {purged}건 보관"
+                + (f" / 손댄 흔적이 있어 남긴 것 {held}건(Status≠신규)" if held else ""))
+        return (purged, held)
+
 
 def iso_week(now: datetime | None = None) -> str:
     """ISO 주차 문자열 `2026-W33` (KST 기준)."""
     now = now or datetime.now(settings.TIMEZONE)
     y, w, _ = now.isocalendar()
     return f"{y}-W{w:02d}"
+
+
+def week_minus(week: str, n: int) -> str:
+    """`2026-W33`에서 n주 전 주차 문자열. 연도 경계를 ISO 달력으로 넘긴다."""
+    y, w = int(week[:4]), int(week[6:])
+    monday = date.fromisocalendar(y, w, 1) - timedelta(weeks=n)
+    yy, ww, _ = monday.isocalendar()
+    return f"{yy}-W{ww:02d}"
+
+
+def purge_cutoff(week: str, keep_weeks: int | None = None) -> str:
+    """이 주차 문자열 **미만**을 정리 대상으로 삼는다.
+
+    keep_weeks=3, week=2026-W33 → 2026-W31 (즉 W31·W32·W33을 남기고 W30 이하를 정리).
+    """
+    keep = keep_weeks if keep_weeks is not None else settings.PURGE_KEEP_WEEKS
+    return week_minus(week, max(keep - 1, 0))
 
 
 def today_kst() -> str:
