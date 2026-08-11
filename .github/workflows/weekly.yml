@@ -19,9 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      # Node 20 런타임이 폐기돼 v4/v5는 강제로 Node 24에서 돌며 경고를 낸다(2025-09 공지).
+      # v7은 action.yml이 `using: node24`라 경고 없이 돈다 — 버전을 올릴 땐 그 값을 확인할 것.
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
