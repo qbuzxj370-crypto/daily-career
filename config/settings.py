@@ -34,6 +34,18 @@ WORKNET_SEARCH_URL = os.environ.get(
     "WORKNET_SEARCH_URL",
     "https://www.work24.go.kr/wk/a/b/1200/retriveDtlEmpSrchList.do")
 HTTP_TIMEOUT = float(os.environ.get("CS_HTTP_TIMEOUT", "15"))
+# 연결 수립 타임아웃은 따로 짧게 잡는다. 전체 타임아웃과 같이 두면 **패킷이 드롭되는**
+# 상황(방화벽이 SYN을 버리는 경우)에서 요청 하나가 15초씩 서 버린다 — 27개 키워드면
+# 재시도까지 얹혀 러너의 20분 예산을 넘긴다. 응답이 느린 것과 닿지 않는 것은 다르다.
+HTTP_CONNECT_TIMEOUT = float(os.environ.get("CS_HTTP_CONNECT_TIMEOUT", "8"))
+# 일시적 전송 실패(ConnectTimeout/ReadTimeout/ConnectError)와 429·5xx만 재시도한다.
+# 4xx는 다시 보내도 같은 답이므로 재시도하지 않는다.
+HTTP_RETRIES = int(os.environ.get("CS_HTTP_RETRIES", "2"))       # 최초 시도 외 추가 횟수
+HTTP_BACKOFF = float(os.environ.get("CS_HTTP_BACKOFF", "1.5"))   # 1.5s → 3s (+지터)
+# 연속 N회 '닿지 않음'이면 그 소스를 이번 실행에서 접는다. IP 차단이라면 남은 수십 번도
+# 확실히 같은 결과이고, 타임아웃마다 수십 초를 태우면 러너 예산이 먼저 죽는다.
+# 키 미설정으로 소스를 비활성화하는 것과 같은 논리다(src/collector.py).
+SOURCE_UNREACHABLE_LIMIT = int(os.environ.get("CS_UNREACHABLE_LIMIT", "3"))
 
 # --- 워크넷 검색 필터 (2026-08-10 실측 확정, docs/ref.md §7) ---
 # 파라미터 이름·코드값은 전부 실제 요청으로 확인했다. **문서가 아니라 관측값이다.**
@@ -49,6 +61,10 @@ HTTP_TIMEOUT = float(os.environ.get("CS_HTTP_TIMEOUT", "15"))
 WORKNET_CAREER_TYPES = os.environ.get("WORKNET_CAREER_TYPES", "N,Z")
 WORKNET_ACADEMIC_GBN = os.environ.get("WORKNET_ACADEMIC_GBN", "00,04")
 WORKNET_REG_DAYS = int(os.environ.get("WORKNET_REG_DAYS", "7"))  # 등록일: 최근 N일(오늘 포함)
+# 워크넷 요청 간 최소 간격(초). 목록 한 건이 ~500KB인데 27개 키워드를 지연 없이 연속으로
+# 때리면 버스트로 보인다. 2026-08-28 CI 실행이 ConnectTimeout으로 죽은 원인 후보 중 하나가
+# 이것이라, 국내 IP에서는 무해한 수준(총 +30초 미만)으로 간격을 둔다. 0이면 비활성.
+WORKNET_REQUEST_GAP = float(os.environ.get("WORKNET_REQUEST_GAP", "1.0"))
 
 # --- 모델 (Gemini) ---
 # 무료 티어 할당량은 **모델별로 따로** 센다(모델당 하루 20요청). 그래서 폴백 모델은

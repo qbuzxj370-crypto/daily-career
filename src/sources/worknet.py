@@ -90,6 +90,33 @@ def _li(row: str, key: str) -> str:
     return _text(m.group(1)) if m else ""
 
 
+# 요청 간격은 **프로세스 전역**으로 잰다. collector가 소스 인스턴스를 하나만 만들긴
+# 하지만, 간격의 목적이 "이 IP가 work24에 보내는 속도"를 늦추는 것이라 인스턴스가 몇
+# 개인지와 무관해야 한다.
+_last_request = 0.0
+
+
+def _throttle(sleep=None) -> float:
+    """직전 요청으로부터 `WORKNET_REQUEST_GAP`초가 지나도록 기다린다. 잔 시간을 반환.
+
+    목록 응답이 건당 ~500KB인데 키워드 27개를 지연 없이 연속으로 보내면 버스트로
+    보인다(2026-08-28 CI ConnectTimeout의 후보 원인). 국내에서 재보니 총 지연은
+    30초 미만이라 주간 배치에서는 무해하다.
+    """
+    global _last_request
+    import time
+    sleep = sleep or time.sleep
+    gap = settings.WORKNET_REQUEST_GAP
+    now = time.monotonic()
+    wait = 0.0
+    if gap > 0 and _last_request:
+        wait = max(0.0, gap - (now - _last_request))
+        if wait:
+            sleep(wait)
+    _last_request = time.monotonic()
+    return wait
+
+
 class WorknetSource:
     """워크넷 공개 검색 결과 수집기. `Source` 프로토콜 구현."""
 
@@ -135,6 +162,7 @@ class WorknetSource:
         return params
 
     def _raw(self, keyword: str, count: int) -> str:
+        _throttle()
         _ctype, body = http_get(
             self.url, self._params(keyword, count), timeout=self.timeout,
             headers={"User-Agent": USER_AGENT,

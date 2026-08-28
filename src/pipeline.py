@@ -352,9 +352,18 @@ def main(argv: list[str] | None = None) -> int:
                           use_prescreen=use_prescreen))
         return 0
     except collector.CollectError as e:
-        print(f"\n수집 실패 — 공고를 한 건도 가져오지 못했습니다.\n{e}\n"
-              "→ 사람인은 .env의 SARAMIN_ACCESS_KEY를 확인하고, 워크넷은 키가 없으니 "
-              "`--probe worknet`으로 페이지 구조가 바뀌지 않았는지 확인하세요.", file=sys.stderr)
+        print(f"\n수집 실패 — 공고를 한 건도 가져오지 못했습니다.\n{e}", file=sys.stderr)
+        # 안내를 원인별로 가른다. 연결 실패에 `--probe`(구조 점검)를 권하면
+        # 멀쩡한 페이지를 뜯어보게 된다 — 2026-08-28에 실제로 그렇게 새어 나갔다.
+        if getattr(e, "unreachable", False):
+            print("→ 서버에 **닿지 못했습니다**(연결/타임아웃). 페이지 구조 문제가 아니므로 "
+                  "`--probe`로 확인할 것이 없습니다. 실행 위치의 네트워크 경로를 보세요 — "
+                  "같은 명령이 다른 망(예: 국내 회선)에서 되는지부터 확인하면 갈립니다.",
+                  file=sys.stderr)
+        else:
+            print("→ 사람인은 .env의 SARAMIN_ACCESS_KEY를 확인하고, 워크넷은 키가 없으니 "
+                  "`--probe worknet`으로 페이지 구조가 바뀌지 않았는지 확인하세요.",
+                  file=sys.stderr)
         return 1
 
 

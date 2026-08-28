@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
+from config import settings
+
 
 @dataclass
 class JobPosting:
@@ -53,6 +55,16 @@ class Source(Protocol):
 
 class SourceError(RuntimeError):
     pass
+
+
+class SourceUnreachable(SourceError):
+    """서버에 **닿지도 못한** 실패 — 연결 타임아웃·DNS·전송 계층 오류.
+
+    파싱 실패(`SourceError`)와 반드시 구분한다. 파싱 실패는 200을 받고 내용이 달라진
+    것이니 `--probe`로 구조를 봐야 하고, 이건 응답 자체가 없으니 구조를 봐도 아무것도
+    안 나온다. 2026-08-28 CI 실행에서 워크넷이 `ConnectTimeout`으로 죽었는데 안내 문구가
+    둘을 섞어 놔서 페이지 구조 변경을 먼저 의심했다 — 실제 페이지는 멀쩡했다.
+    """
 
 
 # ---------------------------------------------------------------- 공용 헬퍼
@@ -121,19 +133,66 @@ def norm_date(value: str | int | None) -> str | None:
         return None
 
 
+# 다시 보내면 달라질 수 있는 상태코드만 재시도한다. 4xx(인증·잘못된 파라미터)는
+# 몇 번을 보내도 같은 답이므로 재시도하면 시간만 버린다.
+RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
+
+
 def http_get(url: str, params: dict[str, Any], *, timeout: float,
-             headers: dict[str, str] | None = None) -> tuple[str, str]:
-    """GET 후 (content-type, 본문 텍스트). 4xx/5xx는 SourceError로 승격."""
+             headers: dict[str, str] | None = None,
+             retries: int | None = None, backoff: float | None = None,
+             sleep=None) -> tuple[str, str]:
+    """GET 후 (content-type, 본문 텍스트).
+
+    - 전송 계층 실패(연결 타임아웃·DNS·리셋)는 백오프 후 재시도하고, 끝내 실패하면
+      **`SourceUnreachable`** 로 올린다(구조 문제와 구분하기 위한 별도 타입).
+    - 429/5xx도 재시도한다. 그 외 4xx/5xx는 즉시 `SourceError`.
+    - 백오프는 지수(`backoff * 2**n`) + 지터. 지터는 27개 키워드가 같은 리듬으로
+      동시에 재시도해 두 번째 버스트를 만드는 것을 막는다.
+    - `sleep`은 테스트에서 실제로 안 자게 주입하는 자리다.
+    """
+    import random
+    import time
+
     import httpx  # 지연 import: --mock 경로에서는 미설치여도 동작
-    try:
-        resp = httpx.get(url, params=params, timeout=timeout,
-                         headers=headers or {"Accept": "application/json"},
-                         follow_redirects=True)
-    except Exception as e:  # noqa: BLE001
-        raise SourceError(f"HTTP 요청 실패 {url}: {type(e).__name__}: {e}") from e
-    if resp.status_code != 200:
-        raise SourceError(f"HTTP {resp.status_code} {url}: {resp.text[:300]}")
-    return resp.headers.get("content-type", ""), resp.text
+
+    retries = settings.HTTP_RETRIES if retries is None else retries
+    backoff = settings.HTTP_BACKOFF if backoff is None else backoff
+    sleep = sleep or time.sleep
+    # 연결 수립만 짧게 끊는다 — 방화벽이 SYN을 버리는 경우 전체 타임아웃까지 서 있을
+    # 이유가 없다. 읽기/쓰기는 목록 HTML이 ~500KB라 넉넉히 둔다.
+    limits = httpx.Timeout(timeout, connect=min(settings.HTTP_CONNECT_TIMEOUT, timeout))
+
+    last = ""
+    reached = False   # 한 번이라도 응답 헤더를 받았는가 (429/5xx는 '닿았지만 거절')
+    for attempt in range(retries + 1):
+        if attempt:
+            sleep(backoff * (2 ** (attempt - 1)) * (1 + random.random() * 0.25))
+        try:
+            resp = httpx.get(url, params=params, timeout=limits,
+                             headers=headers or {"Accept": "application/json"},
+                             follow_redirects=True)
+        except httpx.TransportError as e:
+            # 연결/타임아웃/리셋 — 응답이 없다. 재시도 대상.
+            last = f"{type(e).__name__}: {e}"
+            continue
+        except Exception as e:  # noqa: BLE001 — 그 외는 코드/설정 문제이므로 재시도 무의미
+            raise SourceError(f"HTTP 요청 실패 {url}: {type(e).__name__}: {e}") from e
+        if resp.status_code in RETRY_STATUS:
+            last = f"HTTP {resp.status_code}"
+            reached = True
+            continue
+        if resp.status_code != 200:
+            raise SourceError(f"HTTP {resp.status_code} {url}: {resp.text[:300]}")
+        return resp.headers.get("content-type", ""), resp.text
+
+    tries = retries + 1
+    if reached:
+        # 서버는 살아 있고 거절만 한 것 — 차단/과부하이지 연결 문제가 아니다.
+        raise SourceError(f"{tries}회 시도 모두 거절됨 {url} (마지막: {last})")
+    raise SourceUnreachable(
+        f"응답을 받지 못했습니다 {url}: {tries}회 시도 모두 실패 (마지막: {last}). "
+        "서버에 닿지 못한 것이라 페이지 구조와는 무관합니다")
 
 
 def build_raw_text(*parts: str | None) -> str:

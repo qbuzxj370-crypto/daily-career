@@ -30,13 +30,14 @@ Gemini 프리스크린은 2026-08-11에 실호출로 검증됐다(138건 → 32�
 | P2 수집·정규화·규칙 신호 | ✅ 완료 | `--mock` 6건 전 경로 통과 |
 | P3 LLM 배치 판정 | ✅ 완료 | 주입 테스트(배치→개별→규칙 폴백) 통과. **실제 Gemini 호출은 미실행** |
 | P4 노션 발행·중복 제거 | ✅ 완료 | 가짜 클라이언트로 payload 검증 + **실제 DB 생성·스키마 실측 일치 확인**. 페이지 발행 자체는 미실행 |
-| P5 슬랙·스케줄 | ✅ 완료 | `weekly.yml` 작성. **workflow_dispatch 수동 실행은 미검증** |
+| P5 슬랙·스케줄 | ⚠️ **부분** | 스케줄 실행됨. 단 **2026-08-28 실행에서 워크넷이 ConnectTimeout으로 전멸** (§4-19) |
 | 워크넷 검색 필터(학력·경력·등록일) | ✅ **완료 (2026-08-10)** | 실호출로 totalRecordCount 변화 확인 (614→20) |
+| 수집 재시도·연결 실패 격리 | ✅ **완료 (2026-08-28)** | `test_collect_resilience.py` 10건 + 실호출로 간격 동작 확인 |
 | 제목 프리스크린 | ✅ **완료 (2026-08-11)** | 실제 Gemini 선별 실행 — 138건 → 32건 통과, 오탈락 0건 확인 |
 | 보관 기간 정리(3주) | ✅ 완료 | 주입 테스트 + 실제 DB에 `--purge` 실행(0건, 무해 확인) |
 
-테스트: `python -m pytest tests -q` → **95 passed** (키 0개, 네트워크 0회).
-`test_rules 31 / test_sources 22 / test_state 14 / test_pipeline 12 / test_prescreen 9 / test_notion 7`.
+테스트: `python -m pytest tests -q` → **105 passed** (키 0개, 네트워크 0회).
+`test_rules 31 / test_sources 22 / test_state 14 / test_pipeline 12 / test_collect_resilience 10 / test_prescreen 9 / test_notion 7`.
 
 ### 실제로 돌려서 확인한 것
 
@@ -47,6 +48,7 @@ python -m src.pipeline --dry-run --no-llm (키 없음) → 소스 비활성화 �
 run_probe (HTTP 스텁 주입)            → probe/ 덤프 + 필드 추출표 + 빈 필드 경고 동작
 python -m src.pipeline --init-db --parent-page 3b84cc12…  → DB 생성 성공 (2026-08-10)
 python -m src.pipeline --probe worknet --role public_it   → 실제 페이지 파싱 성공, 전 필드 추출
+python -m src.pipeline --probe worknet --role public_it   → 2026-08-28 재확인, 여전히 성공(구조 변경 없음)
 python -m src.pipeline --dry-run --no-llm                 → 워크넷 150건 수집, 적합 2 · 보통 147 · 위험 1
 # 필터 도입 후 (2026-08-10):
 python -m src.pipeline --dry-run --no-llm  → 144건 수집 → 프리스크린 140건 통과 · 적합 2 · 보통 138
@@ -112,7 +114,7 @@ src/
   state.py            State/EmptyState/NotionState, week_exists, known_source_keys, purge_before, iso_week
   pipeline.py         CLI, _mock_jobs/MockSource, _publish_flow(주입), screen, run_probe, run_purge
 tests/                95개. rules + 오케스트레이션 불변식 중심
-.github/workflows/weekly.yml   cron "0 22 * * 4" (UTC 목22시 = KST 금07시), 발행 전 pytest 실행
+.github/workflows/weekly.yml   cron "19 22 * * 4" (UTC 목22:19 = KST 금07:19), 발행 전 pytest 실행
 ```
 
 ---
@@ -199,6 +201,48 @@ tests/                95개. rules + 오케스트레이션 불변식 중심
     일일 할당량이 끝난 상태에서 배치를 10건으로 쪼개 재시도하면 확실히 실패할 호출을 10번
     더 쏘면서 남은 배치의 quota까지 태운다. 파싱 실패처럼 쪼개면 풀리는 오류와 달리 이건
     쪼개도 안 풀린다 → 이 모델은 접고 바로 폴백 모델로 넘어간다.
+
+18. **"주차별 묶음 + 적합-보통-위험 순"은 노션 뷰로 푼다. 속성을 새로 만들지 않았다** (2026-08-24).
+    사용자 요청은 "주마다 묶고 적합→보통→위험 순으로 보고 싶다"였고, 제안된 방안은
+    `33w-위험`처럼 주차와 판정을 한 열에 합치는 것이었다. **합치지 않았다.** 이유 셋:
+    - `CollectedWeek`는 멱등 키다. `state.week_exists()`가 `rich_text equals "2026-W33"`으로
+      조회하고 `purge_before()`가 같은 값을 사전순 비교한다. 값에 판정을 붙이면 둘 다 깨진다.
+    - 한글 사전순이 원하는 순서가 아니다(보 U+BCF4 < 위 U+C704 < 적 U+C801) — 합친 열을
+      정렬하면 적합이 맨 아래로 간다.
+    - 노션은 select를 **옵션 정의 순서**로 정렬하는데, `Verdict` 옵션이 이미
+      `evaluator.VERDICTS`(적합→보통→위험) 순서다. 즉 필요한 정렬 키가 이미 존재한다.
+    실제 DB(2026-08-24 확인, 43건)에 뷰 **`주차별 · 판정순`**(`view://3c64cc12-d76a-8103-9f8f-000cb332f9cc`)을
+    추가했다: `FILTER Kind=job` · `GROUP BY CollectedWeek` · `SORT BY Verdict ASC, Score DESC`.
+    `apply_rules`가 위험의 score를 2 이하로 누르는 것(§4-4)이 2차 정렬을 안정시킨다.
+    ⚠️ **`Rank` 같은 정렬용 숫자 속성을 추가하려는 유혹을 경계할 것.** 발행이 create-only라
+    이미 쌓인 페이지는 값이 비고, 소급 채우기는 별도 스크립트가 필요하다. 뷰로 충분하다.
+
+19. **"닿지 못함"과 "구조가 바뀜"은 타입부터 분리했다** (2026-08-28).
+    첫 실전 스케줄 실행(`Weekly scout`)에서 워크넷이 `ConnectTimeout: timed out`으로 죽었는데,
+    안내 문구가 이걸 "`--probe worknet`으로 페이지 구조 변경을 확인하라"로 몰았다. **페이지는
+    멀쩡했다** — 같은 파라미터로 로컬에서 부르면 HTTP 200, `totalRecordCount 31`, 행 10건이
+    그대로 파싱된다(2026-08-28 재확인). 문구 하나가 멀쩡한 파서를 뜯어보게 만든 사고다.
+    - `SourceUnreachable(SourceError)`를 추가했다. 전송 계층 실패(연결 타임아웃·DNS·리셋)만
+      이 타입이고, **200을 받은 뒤의 파싱 실패는 계속 `SourceError`** 다. 상위는 문구가 아니라
+      타입으로 갈린다(`collector.CollectError.unreachable` → `pipeline`의 안내 분기).
+    - 429/5xx는 재시도하지만 `SourceUnreachable`이 **아니다** — 서버는 살아서 거절한 것이다.
+      4xx는 재시도하지 않는다(다시 보내도 같은 답).
+    - `HTTP_CONNECT_TIMEOUT=8`을 전체 타임아웃(15)과 분리했다. SYN이 드롭되는 상황에서
+      요청 하나가 15초씩 서면 키워드 27개 × 재시도로 러너의 20분 예산이 먼저 죽는다.
+    - **연속** `SOURCE_UNREACHABLE_LIMIT`(3)회 못 닿으면 그 소스를 이번 실행에서 접는다.
+      키 미설정으로 소스를 끄는 것과 같은 논리다. '연속'이 조건인 이유는, 드문드문 나는
+      실패까지 차단으로 처리하면 잠깐 흔들린 주에 소스 하나가 통째로 빠진 채 발행되기 때문이다.
+    - `WORKNET_REQUEST_GAP=1.0`초. 목록 응답이 건당 ~500KB인데 키워드 27개를 지연 없이
+      연속으로 보내면 버스트로 보인다. 국내 실측 총 지연은 30초 미만이라 주간 배치에 무해하다.
+    ⚠️ **원인은 아직 확정되지 않았다.** 남은 가설은 (a) work24 WAF의 데이터센터 IP 대역 차단,
+    (b) 버스트 차단 둘이고, **다음 실행 로그의 `[경고] worknet ... 수집 실패` 줄 개수가 이걸
+    가른다** — 전부면 (a), 일부면 (b). 사용자 개인 IP 차단은 배제됐다(로컬 호출 정상).
+    (a)로 확정되면 남은 선택지는 self-hosted 러너(국내 IP) 또는 국내 리전 프록시다.
+
+19-1. **부분 실패는 조용하다 — 이건 아직 안 고쳤다.** 한 소스가 죽어도 나머지로 발행되므로
+    (`collector.collect`), 2026-W35는 사람인만 실린 채 발행되고 `CollectedWeek`가 찍혔다.
+    주차 멱등 때문에 같은 주 재실행은 `[skip]`이다. 지금은 로그의 `[경고]`/`[중단]` 줄이
+    유일한 흔적이다. 노션 error 페이지나 슬랙에 "워크넷 0건" 배지를 남길지는 §7(6) 참조.
 
 ---
 
@@ -420,6 +464,23 @@ python -m src.pipeline --publish            # 2회차 → 주차 멱등 스킵(0
 
 GitHub Actions에서 `workflow_dispatch` 수동 1회 → 노션 생성 + 슬랙 수신 확인,
 **슬랙 메시지에 위험 공고 제목이 없는지** 확인.
+
+### (6) ★최우선 — 워크넷 CI 연결 실패의 원인 확정 (2026-08-28)
+
+재시도·간격·소스 차단은 넣었지만 **원인은 아직 모른다.** 다음 스케줄 실행(또는
+`workflow_dispatch` 수동 1회) 로그에서 이것만 세면 갈린다:
+
+```
+[경고] worknet '<키워드>' 수집 실패: 응답을 받지 못했습니다 ...   ← 몇 줄인가
+[중단] worknet 연속 3회 연결 실패 — 이번 실행에서 비활성화        ← 떴는가
+```
+
+- **전부 실패 + [중단] 뜸** → (a) 러너 IP 대역 차단. 재시도로 안 풀린다.
+  → self-hosted 러너(이 PC, 국내 IP) 또는 국내 리전 프록시로 가야 한다.
+- **일부만 실패, 나머지 성공** → (b) 버스트 차단. `WORKNET_REQUEST_GAP`을 2~3초로 올린다.
+- **전부 성공** → 일시적 장애였다. 그대로 둔다.
+
+원인 확정 전에 self-hosted 러너를 세우지 말 것 — (b)였으면 상시 켜 둘 PC를 헛되이 묶는다.
 
 ### (5) 나중에 (docs/career-plan.md §미결)
 
