@@ -17,7 +17,7 @@ session trusts it.
 ## Status: P2–P5 implemented, P1 still open
 
 `docs/career-plan.md` is the spec. P2 (collect/normalize/signals), P3 (LLM judgement), P4 (Notion publish +
-dedup), and P5 (Slack + schedule) are implemented and covered by `tests/` (95 tests, offline). `--mock`
+dedup), and P5 (Slack + schedule) are implemented and covered by `tests/` (107 tests, offline). `--mock`
 runs the whole collector→signals→evaluate→render path with no keys.
 
 **P1 is not done and cannot be done without the user's API keys.** The `FIELDS` tables in
@@ -221,6 +221,10 @@ body as "공고에 정보 없음 — 직접 확인 필요". Do not guess confide
   params; the **사람인 fixture is still an assumption** (see P1).
 - `test_prescreen.py` — rule-forced 위험 is dropped without an LLM call, LLM failure keeps the whole
   batch, the prompt carries no `raw_text`, and a screened-out job is never published.
+- `test_collect_resilience.py` — connection failure is a **different type** from a parse failure
+  (`SourceUnreachable` vs `SourceError`), retries are logged (a silent retry makes a successful run
+  impossible to interpret afterwards), 4xx is never retried, and a source that cannot be reached three
+  times in a row is dropped for the rest of the run.
 - `test_state.py` — also covers the retention sweep: only weeks before the cutoff, never a page whose
   `Status` the user changed, never a page whose week is unreadable.
 

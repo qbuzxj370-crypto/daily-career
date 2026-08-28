@@ -137,11 +137,31 @@ def norm_date(value: str | int | None) -> str | None:
 # 몇 번을 보내도 같은 답이므로 재시도하면 시간만 버린다.
 RETRY_STATUS = frozenset({429, 500, 502, 503, 504})
 
+# 검색어를 로그에 같이 싣기 위한 후보 파라미터명(소스마다 다르다).
+_KEYWORD_PARAMS = ("srcKeyword", "keywords", "keyword")
+
+
+def _default_log(message: str) -> None:
+    """재시도 로그의 기본 출력. stderr로 보내 CI 스텝 로그에 그대로 남긴다."""
+    import sys
+    print(message, file=sys.stderr, flush=True)
+
+
+def _describe(url: str, params: dict[str, Any]) -> str:
+    """로그 한 줄에 들어갈 요청 식별자. 호스트 + 검색어면 충분하다."""
+    from urllib.parse import urlsplit
+    host = urlsplit(url).netloc or url
+    for key in _KEYWORD_PARAMS:
+        value = params.get(key) if params else None
+        if value:
+            return f"{host} '{value}'"
+    return host
+
 
 def http_get(url: str, params: dict[str, Any], *, timeout: float,
              headers: dict[str, str] | None = None,
              retries: int | None = None, backoff: float | None = None,
-             sleep=None) -> tuple[str, str]:
+             sleep=None, log=None) -> tuple[str, str]:
     """GET 후 (content-type, 본문 텍스트).
 
     - 전송 계층 실패(연결 타임아웃·DNS·리셋)는 백오프 후 재시도하고, 끝내 실패하면
@@ -150,6 +170,10 @@ def http_get(url: str, params: dict[str, Any], *, timeout: float,
     - 백오프는 지수(`backoff * 2**n`) + 지터. 지터는 27개 키워드가 같은 리듬으로
       동시에 재시도해 두 번째 버스트를 만드는 것을 막는다.
     - `sleep`은 테스트에서 실제로 안 자게 주입하는 자리다.
+
+    **재시도는 반드시 로그를 남긴다.** 조용히 성공하면 나중에 "재시도가 살린 것"과
+    "원래 문제가 없던 것"을 구분할 수 없다. 2026-08-28에 실제로 이 구분이 안 돼서
+    실행 하나를 통째로 추측으로 해석해야 했다 — 성공한 재시도는 아무 흔적도 안 남겼다.
     """
     import random
     import time
@@ -159,6 +183,7 @@ def http_get(url: str, params: dict[str, Any], *, timeout: float,
     retries = settings.HTTP_RETRIES if retries is None else retries
     backoff = settings.HTTP_BACKOFF if backoff is None else backoff
     sleep = sleep or time.sleep
+    log = log or _default_log
     # 연결 수립만 짧게 끊는다 — 방화벽이 SYN을 버리는 경우 전체 타임아웃까지 서 있을
     # 이유가 없다. 읽기/쓰기는 목록 HTML이 ~500KB라 넉넉히 둔다.
     limits = httpx.Timeout(timeout, connect=min(settings.HTTP_CONNECT_TIMEOUT, timeout))
@@ -167,7 +192,10 @@ def http_get(url: str, params: dict[str, Any], *, timeout: float,
     reached = False   # 한 번이라도 응답 헤더를 받았는가 (429/5xx는 '닿았지만 거절')
     for attempt in range(retries + 1):
         if attempt:
-            sleep(backoff * (2 ** (attempt - 1)) * (1 + random.random() * 0.25))
+            wait = backoff * (2 ** (attempt - 1)) * (1 + random.random() * 0.25)
+            log(f"  [재시도] {_describe(url, params)} {attempt}/{retries}회 — "
+                f"{last} (다음 시도까지 {wait:.1f}s)")
+            sleep(wait)
         try:
             resp = httpx.get(url, params=params, timeout=limits,
                              headers=headers or {"Accept": "application/json"},
@@ -184,6 +212,10 @@ def http_get(url: str, params: dict[str, Any], *, timeout: float,
             continue
         if resp.status_code != 200:
             raise SourceError(f"HTTP {resp.status_code} {url}: {resp.text[:300]}")
+        if attempt:
+            # 이 줄이 "재시도가 살렸다"의 유일한 증거다. 없으면 성공한 실행에서
+            # 일시 장애가 있었는지조차 알 수 없다.
+            log(f"  [복구] {_describe(url, params)} — {attempt}회 재시도 후 성공")
         return resp.headers.get("content-type", ""), resp.text
 
     tries = retries + 1

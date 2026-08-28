@@ -63,11 +63,44 @@ def test_transport_error_is_retried_then_succeeds(monkeypatch):
     slept, sleep = _no_sleep()
 
     ctype, body = http_get("https://example.test", {}, timeout=5,
-                           retries=2, backoff=1.0, sleep=sleep)
+                           retries=2, backoff=1.0, sleep=sleep, log=lambda _m: None)
 
     assert body == "<html>ok</html>"
     assert len(calls) == 2
     assert slept and slept[0] >= 1.0   # 백오프가 실제로 걸렸다(지터로 조금 더 클 수 있다)
+
+
+def test_retry_and_recovery_are_logged(monkeypatch):
+    """재시도와 '재시도 후 성공'은 **반드시** 로그에 남는다.
+
+    조용히 성공하면 나중에 "재시도가 살린 것"과 "원래 문제가 없던 것"을 구분할 수 없다.
+    2026-08-28에 실제로 그 구분이 안 돼서 실행 하나를 추측으로 해석해야 했다.
+    로그 줄에 검색어가 들어가야 collector의 `[경고]` 줄과 짝을 지을 수 있다.
+    """
+    _patch_get(monkeypatch, [
+        httpx.ConnectTimeout("timed out"),
+        FakeResponse(200, "ok"),
+    ])
+    _slept, sleep = _no_sleep()
+    lines: list[str] = []
+
+    http_get("https://www.work24.go.kr/wk/a/b/1200/x.do", {"srcKeyword": "클라우드"},
+             timeout=5, retries=2, backoff=0.01, sleep=sleep, log=lines.append)
+
+    assert len(lines) == 2
+    assert "[재시도]" in lines[0] and "ConnectTimeout" in lines[0]
+    assert "[복구]" in lines[1] and "1회 재시도 후 성공" in lines[1]
+    assert all("클라우드" in ln and "work24.go.kr" in ln for ln in lines)
+
+
+def test_clean_success_logs_nothing(monkeypatch):
+    """한 번에 성공하면 아무것도 안 남긴다 — 로그가 신호로 남으려면 조용해야 한다."""
+    _patch_get(monkeypatch, [FakeResponse(200, "ok")])
+    lines: list[str] = []
+
+    http_get("https://example.test", {}, timeout=5, retries=2, log=lines.append)
+
+    assert lines == []
 
 
 def test_exhausted_retries_raise_unreachable_not_structure_error(monkeypatch):
@@ -80,7 +113,7 @@ def test_exhausted_retries_raise_unreachable_not_structure_error(monkeypatch):
 
     with pytest.raises(SourceUnreachable) as exc:
         http_get("https://example.test", {}, timeout=5,
-                 retries=2, backoff=0.01, sleep=sleep)
+                 retries=2, backoff=0.01, sleep=sleep, log=lambda _m: None)
 
     assert len(calls) == 3                       # 최초 1 + 재시도 2
     assert "페이지 구조와는 무관" in str(exc.value)
@@ -94,7 +127,7 @@ def test_client_error_is_not_retried(monkeypatch):
 
     with pytest.raises(SourceError) as exc:
         http_get("https://example.test", {}, timeout=5,
-                 retries=2, backoff=0.01, sleep=sleep)
+                 retries=2, backoff=0.01, sleep=sleep, log=lambda _m: None)
 
     assert len(calls) == 1
     assert not isinstance(exc.value, SourceUnreachable)   # 닿긴 닿았다
@@ -107,7 +140,7 @@ def test_rate_limit_is_retried_but_is_not_unreachable(monkeypatch):
 
     with pytest.raises(SourceError) as exc:
         http_get("https://example.test", {}, timeout=5,
-                 retries=2, backoff=0.01, sleep=sleep)
+                 retries=2, backoff=0.01, sleep=sleep, log=lambda _m: None)
 
     assert len(calls) == 3
     assert not isinstance(exc.value, SourceUnreachable)
