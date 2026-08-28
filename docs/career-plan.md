@@ -51,7 +51,7 @@ LLM으로 **적합도를 판정**해 노션 DB에 쌓고 슬랙으로 요약을 
 ## 파이프라인 흐름
 
 ```
-GitHub Actions cron (매주 금요일 07:00 KST)
+GitHub Actions cron (매주 금요일 07:19 KST)
         ↓
 ① 멱등성: 이번 주(ISO week) 이미 수집했나? → 예: 종료
         ↓
@@ -287,7 +287,7 @@ API 키 2개를 발급하고 `--probe`로 **실제 응답을 파일로 덤프**�
 
 ### P5 — 슬랙 + 스케줄
 `slack_pub.py`, `.github/workflows/weekly.yml`.
-cron: **`0 22 * * 4`** (UTC 목 22:00 = **KST 금 07:00**).
+cron: **`19 22 * * 4`** (UTC 목 22:19 = **KST 금 07:19**).
 
 ---
 

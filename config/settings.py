@@ -63,7 +63,7 @@ MODEL = os.environ.get("CS_MODEL", "gemini-3.5-flash")
 MODEL_FALLBACK = os.environ.get("CS_MODEL_FALLBACK", "gemini-3.1-flash-lite")
 MAX_TOKENS = 8000  # 배치(최대 10건) JSON 배열을 담을 여유
 
-# --- 타임존 (KST 하드코딩; cron은 UTC로 환산해 0 22 * * 4) ---
+# --- 타임존 (KST 하드코딩; cron은 UTC로 환산해 19 22 * * 4) ---
 TIMEZONE = ZoneInfo("Asia/Seoul")
 
 # --- 튜닝 상수 ---

@@ -79,7 +79,7 @@ Secrets: `.env` locally, GitHub Actions Secrets in CI —
 `SARAMIN_ACCESS_KEY`, `GEMINI_API_KEY`, `NOTION_API_KEY`, `NOTION_DB_ID` (required),
 `SLACK_WEBHOOK_URL` (optional). **워크넷 needs no key** — it is scraped, not called. `GEMINI_API_KEY` and `NOTION_API_KEY` can be the same values daily-recall
 uses; `NOTION_DB_ID` must be a **separate DB**. Never commit `.env` or a webhook URL — the URL itself is
-the secret. Schedule is `.github/workflows/weekly.yml`, cron `0 22 * * 4` UTC = **Fri 07:00 KST**.
+the secret. Schedule is `.github/workflows/weekly.yml`, cron `19 22 * * 4` UTC = **Fri 07:19 KST**.
 
 ## Pipeline architecture
 

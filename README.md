@@ -109,7 +109,7 @@ python -m src.pipeline --probe saramin --role cloud
 ## 파이프라인
 
 ```
-GitHub Actions cron (목 22:00 UTC = 금 07:00 KST)
+GitHub Actions cron (목 22:19 UTC = 금 07:19 KST)
   ① state.week_exists   이번 ISO 주차에 이미 수집? → 예: 종료
   ② collector           사람인·워크넷 × 직무 키워드 → JobPosting 정규화
   ③ state.known_source_keys  기존 SourceKey 전량 1회 조회 → 신규만 남김
