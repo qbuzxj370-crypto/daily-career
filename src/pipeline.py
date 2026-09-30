@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -271,12 +272,70 @@ def run_probe(source_name: str, role_slug: str, log=print) -> int:
     return 0
 
 
+def run_probe_detail(target: str, log=print) -> int:
+    """P1(상세): 공고 1건의 상세 페이지 원본을 덤프하고 추출 결과를 보여준다.
+
+    `target`은 공고번호(`K170082609300018`) 또는 상세 URL 전체. 목록 파싱 결과의 `url`을
+    그대로 넣는 것이 가장 안전하다(쿼리 파라미터를 손으로 조립하지 않는다).
+
+    **이 명령이 `src/sources/worknet_detail.py`의 `LABELS`를 확정한다.** 라벨 문자열은 실제
+    공고 2건에서 관측했지만 HTML 구조는 미검증이므로, 국내 IP에서 한 번 돌려 추출표와
+    비어 있는 필드를 확인해야 P1이 끝난다.
+    """
+    from src.sources.worknet_detail import LABELS, WorknetDetailSource, parse
+
+    src = WorknetDetailSource()
+    log(f"probe-detail: {target}")
+    try:
+        ext, body, url = src.probe(target)
+    except SourceError as e:
+        log(f"probe 실패: {e}")
+        return 1
+
+    PROBE_DIR.mkdir(exist_ok=True)
+    safe = re.sub(r"[^A-Za-z0-9_-]+", "_", target)[:60] or "detail"
+    path = PROBE_DIR / f"worknet_detail_{safe}.{ext}"
+    path.write_text(body, encoding="utf-8")
+    log(f"원본 응답 덤프 → {path}  ({len(body):,} bytes)")
+    log(f"요청 URL: {url}")
+    log("-" * 72)
+
+    try:
+        info = parse(body, source_id=target, url=url)
+    except SourceError as e:
+        log(f"파싱 실패: {e}")
+        log("→ 덤프를 열어 화면 라벨을 확인하고 worknet_detail.LABELS에 추가할 것")
+        return 1
+
+    for key, label in LABELS.items():
+        value = info.worker_count if key == "worker_count" else getattr(info, key, "")
+        shown = "" if value in (None, "") else str(value)
+        if len(shown) > 200:
+            shown = shown[:200] + f" … (총 {len(str(value)):,}자)"
+        log(f"  {label:<12} ({key:<15}): {shown}")
+    log("-" * 72)
+    log(f"기업규모 밴드: {info.size_band()}  ← 판정에 자동 반영되지 않음(사용자 결정 사항)")
+
+    missing = info.missing()
+    if missing:
+        log(f"⚠️ 비어 있는 필드: {missing}")
+        log("   → 공고에 정말 없는 항목일 수도 있다. 덤프에서 해당 라벨을 검색해 보고,"
+            " 라벨 문자열이 다르면 worknet_detail.LABELS를 고칠 것")
+    if not info.duty:
+        log("⛔ 직무내용(본문)이 비었다 — 요건 통계의 원재료이므로 이것만은 반드시 확정해야 한다")
+    else:
+        log(f"✓ 본문 {len(info.duty):,}자 추출 — 요건 추출의 전제 조건 충족")
+    return 0
+
+
 # ---------------------------------------------------------------- CLI
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(description="career-scout 주간 구직 스카우트")
     p.add_argument("--probe", metavar="SOURCE", default=None,
                    help="원본 응답 1건 덤프 (saramin | worknet) — P1 필드 확정용")
+    p.add_argument("--probe-detail", metavar="공고번호|URL", default=None,
+                   help="공고 1건의 상세 페이지 원본 덤프 + 추출표(P1: LABELS 확정)")
     p.add_argument("--mock", action="store_true", help="API 미호출, 픽스처로 전 경로 검증")
     p.add_argument("--dry-run", action="store_true", help="실제 수집·판정, 노션 미발행")
     p.add_argument("--no-llm", action="store_true", help="LLM 미호출, 규칙 신호만(비용 0)")
@@ -325,6 +384,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.probe:
         return run_probe(args.probe, args.role or "cloud")
+
+    if args.probe_detail:
+        return run_probe_detail(args.probe_detail)
 
     if args.purge:
         try:
