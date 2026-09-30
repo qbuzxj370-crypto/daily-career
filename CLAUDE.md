@@ -1,264 +1,250 @@
-# CLAUDE2.md
+# CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+이 파일은 Claude Code가 이 저장소에서 작업할 때 지켜야 할 규칙이다.
 
-## Always read `docs/ref.md` first
+> ⚠️ **이 저장소는 `kmj20021/daily-career`(career-scout)의 fork다.**
+> 원본은 **인프라/운영 트랙 구직자가 관제 전담 공고를 걸러내는 도구**였다. 이 fork는
+> **시장 요건 통계를 쌓고, 그 통계에 내 스펙을 대조해 지원할 곳과 준비할 것의 우선순위를
+> 내는 도구**다. 파이프라인 형태는 물려받았지만 **판정의 목적이 다르고, 원본에 없던
+> 통계층이 바닥에 깔린다.**
+>
+> 원본의 `CLAUDE.md`·`docs/career-plan.md`·`docs/ref.md`에 적힌 판정 기준
+> (`관제 전담 = 위험`, `구축 조직 동거 = 가점`, 인프라 5직군)은 **이 프로젝트의 기준이
+> 아니다.** 원본 문서가 남아 있다면 `docs/upstream/`으로 옮기고, 거기 적힌 기준을
+> 이 프로젝트의 기준으로 오해하지 말 것.
 
-**`docs/ref.md` is the running record of this project and must be read at the start of every session,
-before touching any code.** This file (`CLAUDE.md`) says what the rules are; `docs/career-plan.md` says
-what is being built and why; **`docs/ref.md` says how far it actually got, what has really been run
-against live APIs versus only against fixtures, and which implementation decisions deviate from the plan
-and why.** Without it you will re-derive decisions that were already made — or worse, revert one.
+## 먼저 읽을 것
 
-**When you finish work, update `docs/ref.md`** — its §2 status table, §4 decisions list, and §7 next
-steps — in the same change that made them stale. A stale ref.md is worse than none, because the next
-session trusts it.
+1. **`docs/career-plan.md`** — 무엇을 왜 만드는가 (설계 정본)
+2. **`docs/ref.md`** — 지금 어디까지 됐고, 무엇이 실제로 검증됐고, 무엇이 아직 추측인가
 
-## Status: P2–P5 implemented, P1 still open
+**작업을 끝내면 `docs/ref.md`를 같은 변경에서 갱신한다.** 낡은 ref.md는 없는 것보다
+나쁘다 — 다음 세션이 그것을 믿는다.
 
-`docs/career-plan.md` is the spec. P2 (collect/normalize/signals), P3 (LLM judgement), P4 (Notion publish +
-dedup), and P5 (Slack + schedule) are implemented and covered by `tests/` (107 tests, offline). `--mock`
-runs the whole collector→signals→evaluate→render path with no keys.
+`docs/upstream/`의 원본 문서는 **upstream 코드를 이해할 때만** 참조한다. 거기 적힌
+관측값(work24 파라미터, Gemini 할당량, 노션 API 주의사항)은 여전히 유효한 **사실**이고,
+판정 기준은 유효하지 않다. 이 구분을 지킬 것.
 
-**P1 is not done and cannot be done without the user's API keys.** The `FIELDS` tables in
-`src/sources/saramin.py` and `src/sources/worknet.py` are *doc-derived assumptions* — written defensively
-(multiple candidate paths per field, XML+JSON both parsed) precisely because they are unverified. They are
-not a substitute for the probe. Run `--probe` against both real APIs, fix `FIELDS` against the dump in
-`probe/`, and replace the fixtures in `tests/test_sources.py` with the real payloads. Do not treat a
-green `tests/test_sources.py` as evidence that the mapping is correct — it only proves the parser handles
-the *assumed* shape.
+---
 
-Sibling project `../daily-recall` is the working reference implementation of the same pipeline shape. Read
-its `CLAUDE.md` before designing anything here; the point of this project is to reuse that structure and
-spend the new effort on collection and judgement only.
+## 이 도구가 하는 일 — 3층이고, 순서가 있다
 
-## What this is
-
-`career-scout` (주간 구직 스카우트) is a **personal job-filtering tool**, not a job aggregator. Every Friday
-morning it pulls infra/ops-track postings from official Korean job APIs, judges each one against the user's
-hard criteria, writes them to a Notion DB, and pushes a weekly digest to Slack.
-
-**The problem is not finding postings — it is the hours spent eyeballing dozens per week to reject them.**
-In this track the same job title covers wildly different work: one "시스템 엔지니어" posting is 24/365 관제
-상주 shift work, another sits next to a 구축 team. So the primary product is the **verdict**, not the list.
-The four criteria in `docs/career-plan.md` §판정 기준 are the reason the tool exists — blurring them for
-implementation convenience defeats it:
-
-| Signal | Direction |
-|---|---|
-| 관제 전담 (24/365 monitoring, shift work) | 🔴 위험 |
-| 소기업 / 오너 1인 (lone IT staff, no senior) | 🔴 위험 |
-| 구축 조직 동거 (co-located with a build/SI org) | 🟢 가점 |
-| 주간 중심 (daytime only, no shifts) | 🟢 가점 |
-
-Verdict is 3-valued: `적합` / `보통` / `위험`.
-
-## Commands (`src/pipeline.py`)
-
-```bash
-python -m src.pipeline --probe saramin --role cloud   # dump one raw API response (P1: pin field mapping)
-python -m src.pipeline --mock                         # offline path check, no API keys needed
-python -m src.pipeline --dry-run                      # real collect + judge, no Notion write
-python -m src.pipeline --dry-run --no-llm             # collect + regex signals only (zero LLM cost)
-python -m src.pipeline --publish                      # real publish (week-idempotent)
-python -m src.pipeline --purge                        # archive pages older than 3 ISO weeks
-python -m src.pipeline --init-db --parent-page <ID>   # one-time: create the Notion DB
-python -m pytest tests -q                             # rules + orchestration invariants
+```
+① 수집층  공고 + 상세 본문. 원문 그대로, append-only, 영구 보관
+② 통계층  요건 분포 — 전체 공고 기준. 필수/우대 · 요구 깊이 · 동반 출현 · 시계열
+③ 개인층  통계 × 내 프로필 → 적합도 · 갭 · ROI 순위
 ```
 
-`--no-prescreen` skips the title prescreen (everything collected gets judged and published);
-`--no-purge` skips the retention sweep `--publish` runs first; `--keep-weeks N` overrides how
-many ISO weeks survive that sweep.
+**②를 건너뛰고 ③만 만들면 갭에 순위를 매길 수 없다.**
 
-`--role <slug>` narrows to one role, `--week 2026-W33` pins the ISO week. Follow daily-recall's
-convention: `--mock` is the offline smoke test and runs the full collector→signals→evaluate→render path
-from `_mock_jobs()` with no key set (and never calls the LLM). `--dry-run --no-llm` is specific to this
-project and exists so regex rule changes can be iterated for free.
+```
+통계 없음:  "당신은 Docker가 없습니다"                    ← 사실. 그래서 뭐?
+통계 있음:  "Docker는 백엔드 공고 38%가 요구(필수 11%)"     ← 우선순위가 된다
+둘 결합:    "Docker 하나 채우면 지원 가능 34% → 52%"       ← ★최종 산출물
+```
 
-Secrets: `.env` locally, GitHub Actions Secrets in CI —
-`SARAMIN_ACCESS_KEY`, `GEMINI_API_KEY`, `NOTION_API_KEY`, `NOTION_DB_ID` (required),
-`SLACK_WEBHOOK_URL` (optional). **워크넷 needs no key** — it is scraped, not called. `GEMINI_API_KEY` and `NOTION_API_KEY` can be the same values daily-recall
-uses; `NOTION_DB_ID` must be a **separate DB**. Never commit `.env` or a webhook URL — the URL itself is
-the secret. Schedule is `.github/workflows/weekly.yml`, cron `19 22 * * 4` UTC = **Fri 07:19 KST**.
+마지막 줄이 이 도구가 내려는 답이다. 단일 공고만 보는 매칭으로는 계산할 수 없다.
+**그래서 구현 순서에서 통계층이 개인층보다 앞이다**(`docs/career-plan.md` §9).
 
-## Pipeline architecture
+### 통계는 전량에서 뽑는다 — 선별 이후가 아니다
 
-`src/pipeline.py` orchestrates 9 stages, each a separate module:
+**선별로 버린 공고는 통계에서도 빠진다.** 그러면 시장 분포가 아니라 "내가 관심 있는
+공고의 분포"가 되어 갭 우선순위가 무의미해진다. 요건 추출은 사전 매칭이라 LLM 비용이
+0이므로 전량에서 돌릴 수 있다.
 
-0. **purge** (`state.py`) — archive pages older than `PURGE_KEEP_WEEKS` ISO weeks. Runs first, and a
-   failure here never blocks the publish.
-1. **idempotency** (`state.py`) — already collected this ISO week? → exit.
-2. **collector** (`collector.py` + `sources/`) — call each source per role keyword, normalize to `JobPosting`,
-   drop intra-run duplicates.
-3. **dedup** (`state.py`) — fetch **all** existing `SourceKey`s from Notion in one paginated sweep, filter in memory.
-4. **signals** (`signals.py` + `config/rules.py`) — regex extraction of risk/bonus signals. *Code decides here.*
-5. **prescreen** (`prescreen.py`) — company + title only, ~60 per call. What it drops is **never judged and
-   never written to Notion**.
-6. **evaluator** (`evaluator.py`) — Gemini JSON mode, batched, signals injected as prompt hints.
-7. **notion_pub** (`notion_pub.py`) — one posting = one page.
-8. **slack_pub** (`slack_pub.py`) — weekly digest.
+- **상세 수집 · 요건 추출 · 통계 적재 → 전량**
+- **LLM 설명 · 노션 발행 → 선별 후**
 
-Build the publish flow dependency-injected like `../daily-recall/src/pipeline.py:41` (state, collect_fn,
-evaluate_fn, publisher, slack_fn passed in) so orchestration is verifiable without live APIs.
+이 경계를 흐리면(비용을 아끼려고 선별을 앞으로 당기면) 통계가 편향된다.
 
-## Key architectural facts
+---
 
-- **Rules first, LLM second — and the rules win.** Unambiguous signals (`3교대`, `24*365`, `관제`) are
-  confirmed by regex in code, then injected into the LLM prompt as hints. If the LLM disagrees, **code
-  force-overwrites `verdict` back to `위험`** — the same pattern as `../daily-recall/src/generator.py:146`,
-  where context values overwrite model output. The model is a summarizer here, not the authority.
-  *Mitigation rule:* if `관제` co-occurs with a `구축 조직 동거` signal, do **not** force 위험 — leave it to
-  the LLM, so genuine ops+build hybrid roles are not thrown away. Shift-schedule signals (`3교대`, `24*365`)
-  are forced with no mitigation.
+## 절대 섞지 않는 두 축
 
-- **Two independent idempotency layers. Do not collapse them.** `CollectedWeek` (ISO week, e.g. `2026-W33`)
-  stops a second run in the same week from doing any work at all. `SourceKey` (`"{source}:{공고ID}"`) stops
-  a posting that was already seen *in an earlier week* from being created again. Removing either one
-  produces duplicate pages the moment the other is bypassed.
+| 축 | 정본 | 묻는 것 | 출력 |
+|---|---|---|---|
+| **스펙 적합도** | `config/profile.py` | 내가 지원할 수 있나 | `FitScore` 1~5 + 갭 목록 |
+| **기피 조건** | `config/rules.py` | 가고 싶은 자리인가 | `Verdict` 적합/보통/위험 |
 
-- **`SourceKey` must be a Notion property, never body text** — properties are queryable, page bodies are not.
-  Same reason daily-recall stores `Question` as a property.
+**독립이다. 한 숫자로 합치지 말 것.** 스펙이 완벽해도 기피 조건에 걸리면 위험이어야
+한다. 합치면 "스펙이 완벽한 파견 공고"가 최상위로 올라온다.
+`tests/test_matching.py::test_matcher_does_not_touch_rules_or_evaluator`가 이 경계를
+고정한다 — `src/matcher.py`는 `config/rules.py`를 import하지 않는다.
 
-- **Fetch SourceKeys in bulk, once per run.** One query per posting means dozens of round trips. Reuse the
-  pagination loop at `../daily-recall/src/state.py:75`.
+기피 조건 3개(사용자 확정): **SI·용역 파견 상주 / 야근·주말근무 상시 / 1인 개발·선임 없음**.
+등급과 완화 규칙은 `docs/career-plan.md` §3-1.
 
-- **Notion DB is the single source of truth.** No local state file; the CI runner is ephemeral. Dedup and
-  week-idempotency are both derived from Notion queries.
+---
 
-- **`Status` is a human column.** The pipeline sets it to `신규` at creation and **must never update an
-  existing page.** The user hand-manages 검토중/지원/보류/탈락 there; a "sync" or "refresh existing pages"
-  feature would silently erase their triage work. Publishing is create-only.
-  The one write that touches an existing page is the retention sweep (`state.purge_before`), and it is
-  bounded by the same concern: **it archives only pages still at `신규`.** Age is a necessary condition
-  for cleanup, never a sufficient one — a posting the user already applied to does not get deleted for
-  being old. Week comparison is lexicographic on `YYYY-Www`, which is chronological because of the
-  zero-padding; `test_week_strings_compare_chronologically` pins that.
+## 판정은 2입력이다 — 이게 이 fork의 존재 이유
 
-- **The title prescreen is the only stage that makes a posting disappear.** Anything it drops is never
-  judged and never reaches Notion, so two rules hold it in place (`tests/test_prescreen.py`):
-  rule-forced 위험 is dropped by *code* without asking the model, and **LLM failure fails open** — a
-  broken batch passes through to full judgement rather than vanishing. Losing a week of job leads to a
-  429 is much worse than paying for a few extra judgements. Its prompt gets company + title only; if
-  `raw_text` leaks in, the stage has no reason to exist.
+```
+원본:  공고 → verdict
+여기:  공고 × 내 스펙 → (적합도, 부족한 것)
+```
 
-- **Notion 2025-09 API uses data sources.** Pages are created against a `data_source_id`, not a database id
-  — reuse `resolve_data_source_id()` at `../daily-recall/src/state.py:51` and the "missing select option"
-  400 absorber at `../daily-recall/src/state.py:38`.
+`config/profile.py`가 1급 입력이다. **구현 편의로 이걸 흐리면 프로젝트가 원본의
+복사본으로 되돌아간다.**
 
-- **사람인 = official API. 워크넷 = HTML scrape. The split is deliberate and robots.txt decides it.**
-  The original "official APIs only" rule was overturned on 2026-08-10 for 워크넷 only, because
-  **고용24 OPEN-API is 기업회원 전용** — its own intro page says so, and a real call with a valid key
-  returns `개인회원은 사용할 수 없는 OPEN-API입니다`. data.go.kr delegates that dataset back to 고용24,
-  so no API path exists for a personal account. Before scraping anything, **check robots.txt**:
-  work24.go.kr is `Allow: /` (so `/wk/a/b/1200/...`, which is also in its sitemap, is fair game) while
-  saramin.co.kr has `Disallow: /zf_user/recruit/` — so 사람인 must stay on its API and **must never be
-  scraped**. `/cm/f/c/0100/selectUnifySearchPost.do` (work24 통합검색) is explicitly disallowed too.
+---
 
-- **LLM calls are batched, and the free tier's real ceiling is daily, not per-minute.** Measured
-  2026-08-10 from the 429 body: **20 requests per day per model** (`gemini-2.5-flash` and
-  `gemini-2.5-flash-lite` each get their own 20). Waiting does not clear it. Judge in batches of
-  `EVAL_BATCH_SIZE` (10) returning an array; on batch failure, retry that batch as individual calls,
-  then fall back to `MODEL_FALLBACK`. **Exception: on 429/RESOURCE_EXHAUSTED, skip the individual
-  retries** — they are certain to fail and would burn 10 more of the day's 20 requests
-  (`evaluator._is_quota_exhausted`). This budget is why the prescreen exists: 144 postings cost 15
-  requests to judge outright, versus 3 to prescreen plus a few for the survivors.
+## 손대기 전에 알아야 할 것
 
-- **Slack is a secondary notification.** Its exceptions are swallowed; a Slack failure never invalidates a
-  successful Notion publish. On total collect/publish failure, write a `Kind=error` page and re-raise so the
-  scheduler registers it.
+### 원본에서 물려받은 원칙 (유지)
 
-- **Risky postings appear as a count only in Slack — never their titles.** Not cosmetics: the tool's purpose
-  is to *save the time spent scanning*, and listing rejects in the digest re-creates exactly the scanning it
-  removes. Titles for 위험 stay in Notion for anyone who wants to audit the judgement.
+- **규칙이 LLM을 이긴다.** 정규식과 사전 매칭은 결정적이고, 결정적인 것을 모델에 맡기면
+  같은 공고가 실행마다 다르게 판정된다. `signals.py`·`requirements.py`·`matcher.py`는
+  **LLM을 호출하지 않는다.** `evaluator`는 결과를 힌트로 받아 설명만 쓰고, 코드가 최종값을
+  덮어쓴다.
+- **`Status`는 사람 열이다.** 생성 시 `신규`만 넣고 기존 페이지를 **절대 수정하지 않는다.**
+  "동기화·갱신" 기능을 붙이면 사용자의 분류 작업(검토중/지원/보류/탈락)이 지워진다.
+  발행은 create-only. 3주 보관 정리도 `Status=신규`인 페이지만 건드린다 — 나이는 정리의
+  필요조건이지 충분조건이 아니다.
+- **멱등 레이어를 합치지 말 것.** `SourceKey`(같은 공고 재생성 방지)와 일자/주차 키는
+  서로 다른 것을 막는다. 하나를 지우면 다른 하나가 우회되는 순간 중복 페이지가 생긴다.
+- **선별 단계의 실패는 통과 쪽으로 연다(fail-open).** 호출이 깨졌을 때 전부 버리면 그날의
+  구직 기회가 조용히 사라진다. 429 하나에 하루를 잃는 것보다 판정을 몇 건 더 하는 게 낫다.
+- **슬랙은 보조 알림이다.** 실패가 노션 발행을 무효화하지 않는다. 위험 공고 제목은 싣지
+  않는다 — 탈락 공고를 나열하면 없애려던 스캔이 되살아난다.
+- **마크다운 표 금지.** `md_to_notion.py`가 표를 파싱하지 못한다. `matcher.report()`도
+  이 제약을 지킨다(`test_report_has_no_markdown_table`).
+- **slug를 삭제하지 말 것.** 노션 select 옵션과 기발행 페이지가 무효화된다. 범위는
+  우선순위로 조절한다.
 
-- **Controlled markdown subset.** `md_to_notion.py` is copied verbatim from daily-recall and parses only that
-  project's fixed subset (H1–H3, paragraph, `**bold**`, `` `code` ``, fenced blocks, `-` bullets, `---`, `>`).
-  **No markdown tables** — the converter breaks on them, so the evaluator prompt must forbid them too.
+### 저장소 분리 — 노션은 원천이 아니다
 
-- **slug is the canonical key.** `config/roles.py` owns `slug → (display name, keywords, priority)`.
-  `JobPosting.role` stores the slug; display names appear only in Notion `Role` and in prompts. Narrow scope
-  by adjusting priority/weights, never by deleting a slug from the canonical list — deleting invalidates the
-  Notion select options and previously published pages.
-
-## P1 gates the source mappings
-
-`--probe`, dumping raw responses to `probe/`, is what pins the field mappings. Do not derive them from
-docs alone; docs diverge from actual responses often enough that anything built on documentation is
-likely to be rewritten. `run_probe()` prints the extracted `JobPosting` and a list of **empty fields**.
-
-**워크넷 is done** (2026-08-10) — mapping verified against the live page, and `tests/test_sources.py`
-now carries two real result rows as its fixture. **사람인 is not** — its `FIELDS` table is still a
-doc-derived assumption and its fixture is invented. A green `test_sources.py` proves the 워크넷 mapping
-and only the 사람인 *parser shape*.
-
-Two 워크넷 details that cost hours to find and will not be re-derivable from the page source:
-**`searchMode=Y` is mandatory** — without it the keyword is silently ignored and you get the unfiltered
-latest list (which looks like a working search until you read the titles). And the per-row anchor is the
-compare-checkbox `value`, which packs `공고번호|정보구분|회사명|공고제목` in one attribute. Endpoints stay
-env-overridable (`SARAMIN_API_URL`, `WORKNET_SEARCH_URL`) since work24 has already moved once.
-
-⚠️ **Known limitation, do not paper over it.** Neither source gives company headcount or the posting
-body. 사람인's search API returns metadata only; 워크넷's list rows carry 급여·경력·학력·근무형태·지역
-but no 사원수 and no 본문. So "소기업 · 오너 1인" is caught only when the wording says it outright
-(`1인 전산`, `대표 직속`), and text-based signals like `3교대` only fire if they appear in the fields
-that are listed. (워크넷 does surface 근무형태 — `주5일`, `08:30 ~ 19:30` — which is why "주간 중심"
-fires reliably there and rarely on 사람인.) `Verdict.company_size` therefore carries `판단 불가`, rendered in the page
-body as "공고에 정보 없음 — 직접 확인 필요". Do not guess confidently, and do not quietly drop the criterion.
-
-## Tests
-
-`python -m pytest tests -q` — offline, no keys, also run in CI before publishing.
-
-- `test_rules.py` — the user's four criteria as regex behaviour, plus "rules beat the LLM" (forced 위험
-  survives an LLM `적합`, and the 관제+구축 mitigation does not force).
-- `test_pipeline.py` — the two idempotency layers separately, partial-publish handling, Slack never
-  listing 위험 titles, batch→individual→rule fallback.
-- `test_notion.py` — `SourceKey` is a property not body text, `Status` is create-only `신규`, unknown
-  signal names are dropped, page body has no markdown table, every written property exists in the schema.
-- `test_state.py` — bulk `SourceKey` sweep paginates (not one query per posting), `week_exists` stops
-  after one row.
-- `test_sources.py` — 워크넷 fixture is a real response and pins that mapping plus the three filter
-  params; the **사람인 fixture is still an assumption** (see P1).
-- `test_prescreen.py` — rule-forced 위험 is dropped without an LLM call, LLM failure keeps the whole
-  batch, the prompt carries no `raw_text`, and a screened-out job is never published.
-- `test_collect_resilience.py` — connection failure is a **different type** from a parse failure
-  (`SourceUnreachable` vs `SourceError`), retries are logged (a silent retry makes a successful run
-  impossible to interpret afterwards), 4xx is never retried, and a source that cannot be reached three
-  times in a row is dropped for the rest of the run.
-- `test_state.py` — also covers the retention sweep: only weeks before the cutoff, never a page whose
-  `Status` the user changed, never a page whose week is unreadable.
-
-## Reuse from daily-recall (do not rewrite)
-
-| Take | From | Changes |
+| | 담는 것 | 보관 |
 |---|---|---|
-| `md_to_notion.py` entire file | `../daily-recall/src/md_to_notion.py` | none |
-| `NotionState._query()` pagination | `../daily-recall/src/state.py:75` | none |
-| `resolve_data_source_id()` | `../daily-recall/src/state.py:51` | none |
-| `_is_missing_select_option()` | `../daily-recall/src/state.py:38` | none |
-| `init_db()` / `_schema_properties()` | `../daily-recall/src/notion_pub.py:53` | swap the property schema |
-| `slack_pub._post()` | `../daily-recall/src/slack_pub.py:14` | none |
-| `_publish_flow` injection shape | `../daily-recall/src/pipeline.py:41` | swap the stages |
+| **repo (SQLite/JSONL)** | 공고 원문 · 요건 레코드 · 일별 통계 | **영구** |
+| **노션** | 공고 카드 · 주간 리포트 · 갭 스냅샷 | 공고는 3주 |
 
-## Tuning constants
+원본은 "노션이 유일한 정본"이었다. **주간·수십 건 규모였기 때문이다.** 매일 수집 +
+전량 요건 적재면 수천~수만 레코드가 쌓이고, 노션 API는 초당 3건 제한이라 조회가
+버벅여 수집 자체가 느려진다.
 
-`config/settings.py`: `MODEL` / `MODEL_FALLBACK` (`gemini-2.5-flash` / `gemini-2.5-flash-lite`, env
-overridable), `EVAL_BATCH_SIZE=10`, `PRESCREEN_BATCH_SIZE=60`, `MAX_JOBS_PER_ROLE=30`, `SLACK_TOP_N=5`,
-`ROLE_PRIORITY` (`cloud`, `public_it` first), `SEND_SLACK = bool(SLACK_WEBHOOK_URL)`,
-`PRESCREEN` (`CS_PRESCREEN=0` disables), `PURGE_KEEP_WEEKS=3` (`CS_PURGE_KEEP_WEEKS`).
-`config/roles.py` owns the 5 role slugs; `config/rules.py` owns the `RISK` / `POSITIVE` regex sets.
+**소급이 안 되는 결정 두 개 — 스키마를 만들 때 반드시 지킬 것:**
 
-**워크넷 search filters** (`WORKNET_CAREER_TYPES=N,Z`, `WORKNET_ACADEMIC_GBN=00,04`,
-`WORKNET_REG_DAYS=7`) narrow the search server-side before anything else runs. The codes and their
-measured effect are tabulated in `docs/ref.md` §7(1); three details bite if you touch them: the
-server reads `careerTypes` (plural) and ignores the checkbox's own `careerType`; `regDateStdt`/
-`regDateEndt` must be `YYYYMMDD` or the result list comes back **empty**; and `termSearchGbn=W-1`
-is a UI button state the server ignores, so the dates must be computed. The defaults include
-학력무관/경력무관 on purpose — most 워크넷 postings are registered that way, and filtering to
-`04`/`N` alone drops the majority of postings the user actually qualifies for (614 → 72).
+- **`raw_text`와 `skill_raw`를 가공 전 원문으로 저장한다.** 스킬 사전은 계속 고쳐진다.
+  원문이 있으면 사전을 고칠 때마다 과거에 **소급 재적용**할 수 있다. 어설프게 정규화해서
+  저장하면 사전을 고칠 때마다 과거 데이터가 쓰레기가 된다.
+- **공고를 UPDATE하지 말고 매 수집마다 append한다.** 그래야 공고가 언제 열리고 닫혔는지
+  복원되고 **생존기간**(며칠 만에 닫히는가 = 경쟁이 몰리는 조건)이 공짜로 나온다.
+  UPDATE로 짜면 이 전부를 영영 못 얻는다.
 
-Regex rules in `config/rules.py` are the one part of this project that **must keep real tests** — they are
-pure functions over strings, they encode the user's actual criteria, and a silently broken pattern turns a
-위험 posting into a 적합 one. Patterns are graded `hard` (force 위험 unconditionally) vs `soft`
-(mitigable via `MITIGATED_BY`); changing a pattern's grade changes the user's criteria, so add a test with
-it. See `tests/test_rules.py`.
+### 이 fork에서 바뀐 것
+
+- **판정 기준 전량 교체.** `config/rules.py`·`config/roles.py`는 원본의 것이 아니다.
+- **`config/profile.py` 신설** — 내 스펙. 판정의 두 번째 입력.
+- **`config/skills.py` 신설** — 스킬 정규화 사전. 이게 없으면 갭 분석이 성립하지 않는다.
+- **`src/requirements.py`·`src/matcher.py` 신설** — 요건 추출과 갭 매칭.
+- **`src/sources/worknet_detail.py` 신설** — 상세 페이지. 본문·우대사항·근로자수의 출처.
+- **매일 수집** — 원본은 주 1회(금)였다. 일자 멱등(`CollectedDate`)을 추가하고
+  `CollectedWeek`은 보관 정리·주간 리포트용으로 유지한다.
+- **LLM 프리스크린 → 코드 게이트.** 원본은 판정 기준이 LLM에만 있어서 제목을 모델에 보내
+  1차 선별해야 했다(Gemini 무료 티어가 **모델당 하루 20요청**이라 비용상 필수였다).
+  이 프로젝트는 코드가 이미 `FitScore`와 `Verdict`를 계산하므로 **선별도 코드가 한다** —
+  LLM 요청이 거의 사라지고 매일 돌려도 한도에 여유가 생긴다. 버려진 공고도 통계에는 이미
+  들어가 있다. `prescreen.py`는 남겨 두되 기본 비활성(`CS_PRESCREEN=0`)으로 두어,
+  게이트가 기대만큼 안 걸러내면 되돌릴 수 있게 한다.
+
+### 갭 분석의 정직성 규칙 — 이걸 깨면 도구가 무의미해진다
+
+- **자격증은 스킬 레벨을 채우지 않는다.** SQLD 보유 × SQL 실무 요구 = **부분 충족**이다.
+  환산하면 "너는 준비됐다"는 거짓 신호가 나오고 못 뚫는 이유를 영원히 모른다.
+  `test_cert_only_is_partial_not_met`.
+- **실패 방향은 '갭을 과소평가하지 않는 쪽'이다.** 필수가 우대를 이기고(`_dedupe`),
+  두 단계 부족은 부분이 아니라 미충족이고, 숙련도는 보수적으로 적는다.
+- **요건 0건은 0점이 아니라 `None`이다.** 상세 본문 확보 실패를 '부적합'으로 오인하는
+  것이 이 도구에서 가장 위험한 혼동이다. `test_empty_requirements_gives_none_not_zero`.
+- **적합도는 충족 비율로 낸다.** 미충족 *개수*로 감점하면 변별력이 사라진다 — 실제로
+  백엔드 신입 공고와 경력 3년 공고가 둘 다 1점으로 나왔다. 전부 1점이면 정렬이 안 되고
+  "적합한 곳 찾기"가 성립하지 않는다.
+- **우대 미충족은 감점하지 않는다.** 감점하면 기술을 많이 나열한 공고가 전부 부적합이
+  되어 공고 인플레이션에 끌려간다.
+- **요건이 적은 공고는 점수를 깎지 않고 신뢰도만 경고한다.** 깎는 것은 추측이다.
+
+### 스킬 사전을 늘릴 때
+
+- **짧은 한글 별칭을 넣지 말 것.** 단어 경계를 걸 수 없어 부분 일치가 난다. 실제로
+  `뷰`(Vue)가 **`코드리뷰`에 걸려** 백엔드 공고 갭 목록에 프론트 프레임워크가 끼었다.
+  `Boot`(부트캠프)·`TS`(국내에선 기술지원)도 같은 이유로 제거했다.
+  `test_short_korean_alias_does_not_false_match`가 지킨다.
+- **함의 관계(`IMPLIES`)는 좁게 유지한다.** 논쟁 없이 참인 것만(프레임워크→언어,
+  DBMS→SQL). 넓히면 모든 공고가 불가능해 보이고 적합도가 변별력을 잃는다.
+- 사전은 **실제 공고에서 못 잡힌 단어를 보고** 늘린다. 추측으로 미리 채우면 오탐만 는다.
+
+### 스크래핑 경계 — robots.txt가 결정한다
+
+| 사이트 | robots.txt | 방식 |
+|---|---|---|
+| work24.go.kr | `Allow: /` (차단: `/cm/common/`, `/sa/`, `/ei/`, `selectUnifySearchPost.do`) | HTML 파싱 |
+| saramin.co.kr | `Disallow: /zf_user/recruit/` | **공식 API만. 절대 스크래핑 금지** |
+
+고용24 OPEN-API는 **기업회원 전용**이라 개인 계정으로 열리지 않는다(실호출 시
+`개인회원은 사용할 수 없는 OPEN-API입니다`). data.go.kr도 이 데이터셋을 고용24로 위임한다.
+**다시 시도하지 말 것** — 배제된 가설은 `docs/upstream/ref.md` §7(1)에 표로 있다.
+
+목록은 `/wk/a/b/1200/`, 상세는 `/wk/a/b/1500/`. 둘 다 차단 목록에 없다.
+work24 통합검색(`/cm/f/c/0100/selectUnifySearchPost.do`)은 **명시적 금지 경로**다.
+
+---
+
+## 명령
+
+```bash
+python -m src.pipeline --mock                    # 키 없이 전 경로 검증(오프라인)
+python -m src.pipeline --probe worknet --role backend
+python -m src.pipeline --probe-detail <공고번호>  # 상세 라벨 확정 (P0)
+python -m src.pipeline --dry-run --no-llm        # 실제 수집 + 규칙·갭만 (LLM 비용 0)
+python -m src.pipeline --dry-run                 # + LLM 판정, 노션 미발행
+python -m src.pipeline --init-db --parent-page <ID>
+python -m src.pipeline --publish
+python -m pytest tests -q
+```
+
+시크릿: `.env` 로컬 / GitHub Actions Secrets.
+`GEMINI_API_KEY`, `NOTION_API_KEY`, `NOTION_DB_ID` 필수, `SARAMIN_ACCESS_KEY`·
+`SLACK_WEBHOOK_URL` 선택. **워크넷은 키가 없다**(스크래핑).
+
+⚠️ **`NOTION_DB_ID`는 친구 것과 반드시 별도 DB.** Gemini 키도 **모델당 하루 20요청**이라
+공유하면 서로 잡아먹는다.
+
+---
+
+## 선결 과제 (P0) — 이것부터
+
+1. **work24가 데이터센터 IP를 차단한다.** 원본 `ref.md` §19의 CI `ConnectTimeout`이
+   미해결이고, 2026-09-30에 다른 클라우드 환경에서도 재현됐다(프록시 403). 매일 수집 +
+   상세 수집을 전량으로 돌리면 요청 수가 원본의 몇 배다 — **안 풀리면 매일 실패한다.**
+   개인용 도구이고 **원천 저장소가 repo이므로 로컬 cron이 가장 싼 해법**이다.
+2. **상세 페이지 라벨 확정.** 라벨 문자열은 실제 공고 2건에서 관측했지만 **HTML 구조는
+   미검증**이다. `--probe-detail`을 국내 IP에서 1회 돌려 `직무내용`이 추출되는지 확인.
+   실패하면 갭 분석 자체가 성립하지 않는다.
+3. **목록 수집 결함 3개** — `docs/career-plan.md` §8 P0-3. 키워드 굶음, 페이지네이션
+   없음, 실패한 날 영구 손실. 원본에서는 "공고를 몇 건 놓치는" 문제였지만 **통계를 쌓으면
+   표본 편향이 된다.** 특히 뒤쪽 키워드가 굶는 문제는 정밀도 높은 키워드를 체계적으로
+   지우므로 분포를 왜곡한다. **셋 다 고치기 전의 통계는 신뢰할 수 없다 — 순서상 통계층
+   구현보다 앞이다.**
+
+---
+
+## 테스트
+
+`python -m pytest tests -q` — 오프라인, 키 0개, CI에서 발행 전에 실행.
+
+**실제 테스트를 유지해야 하는 모듈**은 넷이다. 순수 함수 + 문자열이고, 조용히 깨지면
+**거짓말하는 갭 리포트**가 나온다 — 그건 없는 것보다 나쁘다.
+
+| 파일 | 지키는 것 |
+|---|---|
+| `test_rules.py` | 기피 조건 3개의 정규식 동작, 규칙이 LLM을 이긴다 |
+| `test_matching.py` | 사전 오탐, 필수/우대 분리, 자격증≠레벨, 적합도 변별력, 두 축 분리 |
+| `test_worknet_detail.py` | 라벨 추출, 본문이 라벨 오탐으로 잘리지 않음 |
+| `test_pipeline.py` | 멱등 레이어 각각, 부분 발행, 슬랙이 위험 제목을 싣지 않음 |
+
+⚠️ **초록이라고 실제 페이지에서 동작한다는 증거가 아니다.** `test_worknet_detail.py`와
+`test_sources.py`(사람인)의 픽스처는 **추정 구조**다. `--probe`로 실제 덤프를 받아
+교체해야 P1이 끝난다.
+
+**프로필을 고칠 때는 `test_every_profile_skill_is_canonical`을 믿어라** — 스킬 이름
+오타는 조용히 '레벨 0'이 되어 **있는 스킬이 갭으로 나온다.** 눈으로 찾기 어려운 버그다.
