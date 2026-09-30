@@ -1,4 +1,17 @@
-# career-scout 작업 참조 (ref.md)
+# 작업 참조 (ref.md)
+
+> ⚠️ **이 문서는 fork 지점을 가로지른다.** §1~§19는 upstream(`kmj20021/daily-career`,
+> career-scout)의 기록이고 **§20부터가 이 fork의 기록**이다. upstream 기록의
+> **관측값**(work24 파라미터, Gemini 할당량, 노션 API 주의사항, 배제된 가설 표)은 여전히
+> 유효한 사실이므로 그대로 신뢰하고, **판정 기준**(관제 전담·구축 조직 동거·인프라 5직군)은
+> 이 프로젝트의 기준이 아니다. 목적이 바뀐 근거는 `docs/career-plan.md`.
+>
+> 이 fork의 목표는 **시장 요건 통계를 쌓고 그 통계에 내 스펙을 대조해 지원할 곳과 준비할
+> 것의 우선순위를 내는 것**이다. 원본 문서는 `docs/upstream/`에 있다.
+
+---
+
+# (upstream) career-scout 작업 참조
 
 > **다른 세션이 이 프로젝트를 이어받을 때 가장 먼저 읽는 문서.**
 > `docs/career-plan.md` = 무엇을 왜 만드는가(설계 정본), `CLAUDE.md` = 손댈 때 지켜야 할 규칙,
