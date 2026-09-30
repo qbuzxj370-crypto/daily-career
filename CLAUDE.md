@@ -46,6 +46,11 @@
 마지막 줄이 이 도구가 내려는 답이다. 단일 공고만 보는 매칭으로는 계산할 수 없다.
 **그래서 구현 순서에서 통계층이 개인층보다 앞이다**(`docs/career-plan.md` §9).
 
+> 📐 위 숫자는 **형식 예시이고 실측이 아니다.** 수집된 데이터가 아직 한 건도 없다.
+> ⚠️ 그리고 **ROI 계산식은 아직 정의되지 않았다**(`docs/career-plan.md` §10-8).
+> 최종 산출물이라고 선언한 것이 미정의 상태이므로, 구현 전에 분모·분자·묶음 탐색 범위를
+> 먼저 정할 것.
+
 ### 통계는 전량에서 뽑는다 — 선별 이후가 아니다
 
 **선별로 버린 공고는 통계에서도 빠진다.** 그러면 시장 분포가 아니라 "내가 관심 있는
@@ -191,10 +196,15 @@ work24 통합검색(`/cm/f/c/0100/selectUnifySearchPost.do`)은 **명시적 금�
 
 ## 명령
 
+> ⚠️ `--role` 값은 `config/roles.py`에 있는 slug여야 한다. **아래 `backend`는 아직
+> 없다** — `roles.py`를 이 fork의 직군으로 교체(P1)하기 전에는 upstream의 slug
+> (`cloud`·`public_it`·`sys_ops`·`tech_support`·`network`)만 동작하고, 없는 값을 주면
+> `KeyError`가 난다.
+
 ```bash
 python -m src.pipeline --mock                    # 키 없이 전 경로 검증(오프라인)
-python -m src.pipeline --probe worknet --role backend
-python -m src.pipeline --probe-detail <공고번호>  # 상세 라벨 확정 (P0)
+python -m src.pipeline --probe worknet --role backend   # ← P1 이후
+python -m src.pipeline --probe-detail <공고번호>  # 상세 라벨 확정 (P0). role 불필요
 python -m src.pipeline --dry-run --no-llm        # 실제 수집 + 규칙·갭만 (LLM 비용 0)
 python -m src.pipeline --dry-run                 # + LLM 판정, 노션 미발행
 python -m src.pipeline --init-db --parent-page <ID>
@@ -206,17 +216,30 @@ python -m pytest tests -q
 `GEMINI_API_KEY`, `NOTION_API_KEY`, `NOTION_DB_ID` 필수, `SARAMIN_ACCESS_KEY`·
 `SLACK_WEBHOOK_URL` 선택. **워크넷은 키가 없다**(스크래핑).
 
-⚠️ **`NOTION_DB_ID`는 친구 것과 반드시 별도 DB.** Gemini 키도 **모델당 하루 20요청**이라
-공유하면 서로 잡아먹는다.
+🚫 **`NOTION_DB_ID`는 upstream 것을 절대 쓰지 말 것.** `docs/upstream/ref.md` §2에 그
+DB ID가 적혀 있고 §7에 "`--init-db` 실행 금지"라는 주석이 있는데, **둘 다 upstream
+기준이다.** 노션 통합·토큰이 공유라 그 ID를 쓰면 실제로 남의 DB에 발행된다. 이 fork는
+자기 부모 페이지 아래에 `--init-db`로 **새 DB를 만들고** 그 ID를 쓴다.
+
+⚠️ **Gemini 할당량은 미검증 이월이다.** upstream이 측정한 "모델당 하루 20요청"은
+`gemini-2.5-*` 기준(2026-08-10)이고 현재 `settings.py`는 `gemini-3.5-flash`/
+`gemini-3.1-flash-lite`다. **3.x의 실제 한도는 확인되지 않았다.** 다만 이 fork는 선별을
+코드 게이트로 하므로 LLM 요청이 원본보다 훨씬 적어 제약의 중요도가 낮다 — 한도에 부딪히면
+그때 실측할 것. 키를 upstream과 공유하면 서로 잡아먹는다.
 
 ---
 
 ## 선결 과제 (P0) — 이것부터
 
-1. **work24가 데이터센터 IP를 차단한다.** 원본 `ref.md` §19의 CI `ConnectTimeout`이
-   미해결이고, 2026-09-30에 다른 클라우드 환경에서도 재현됐다(프록시 403). 매일 수집 +
-   상세 수집을 전량으로 돌리면 요청 수가 원본의 몇 배다 — **안 풀리면 매일 실패한다.**
-   개인용 도구이고 **원천 저장소가 repo이므로 로컬 cron이 가장 싼 해법**이다.
+1. **CI에서 work24에 닿지 못하는 원인이 미확정이다.** 원본 `ref.md` §19의 `ConnectTimeout`.
+   가설은 (a) WAF의 데이터센터 IP 차단, (b) 버스트 차단, 제3의 원인. **가르는 방법은
+   §19에 있다** — 다음 실행 로그의 실패 줄 개수가 전부면 (a), 일부면 (b).
+   매일 수집 + 상세 전량이면 요청 수가 원본의 몇 배라 원인이 무엇이든 더 아프다.
+   **원인 확정 전에는 요청을 늘리는 변경을 CI에 올리지 말 것.** 개인용 도구이고 원천
+   저장소가 repo이므로 **로컬 cron이 가장 싼 우회**다.
+   ⚠️ 2026-09-30에 이 프로젝트를 분석한 클라우드 환경에서 403이 났지만 **그것은 가설의
+   증거가 아니다** — 그 환경 자신의 이그레스 허용 목록이 거부한 것이고 work24는 요청을
+   본 적조차 없다. 자기 환경의 정책 거부를 상대 서버의 차단으로 읽지 말 것.
 2. **상세 페이지 라벨 확정.** 라벨 문자열은 실제 공고 2건에서 관측했지만 **HTML 구조는
    미검증**이다. `--probe-detail`을 국내 IP에서 1회 돌려 `직무내용`이 추출되는지 확인.
    실패하면 갭 분석 자체가 성립하지 않는다.
