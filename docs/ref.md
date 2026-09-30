@@ -1,7 +1,11 @@
 # 작업 참조 (ref.md)
 
-> ⚠️ **이 문서는 fork 지점을 가로지른다.** §1~§19는 upstream(`kmj20021/daily-career`,
-> career-scout)의 기록이고 **§20부터가 이 fork의 기록**이다. upstream 기록의
+> ⚠️ **이 문서는 fork 지점을 가로지른다.** 대부분은 upstream(`kmj20021/daily-career`,
+> career-scout)의 기록이고, **이 fork가 추가한 것은 §4의 20·21·21-1 항목과 §2 상태표의
+> 두 행, §7(0), 그리고 테스트 개수(181)다.** §4의 항목 번호는 파일 순서와 다르다
+> (…20 → 21 → 21-1 → 19-1) — 삽입 위치 때문이며 번호가 정본이다.
+> **그 밖의 모든 내용, 특히 §8 환경 메모와 §9 체크리스트는 upstream 작성자(MinjeKim)의
+> PC·환경·워크플로 기준이다.** 현재 환경의 사실로 읽지 말 것. upstream 기록의
 > **관측값**(work24 파라미터, Gemini 할당량, 노션 API 주의사항, 배제된 가설 표)은 여전히
 > 유효한 사실이므로 그대로 신뢰하고, **판정 기준**(관제 전담·구축 조직 동거·인프라 5직군)은
 > 이 프로젝트의 기준이 아니다. 목적이 바뀐 근거는 `docs/career-plan.md`.
@@ -77,6 +81,11 @@ python -m src.pipeline --purge             → [purge] 2026-W31 이전 0건 보�
 NOTION_DB_ID   = d189c28d-67a8-4479-b885-d9499d437fd7
 data source id = 95ed4ea3-fd6d-4fc4-936f-99405802bbe9
 ```
+
+> 🚫 **이 fork는 위 DB를 쓰지 않는다.** upstream 작성자의 DB이고, 여기에 발행하면 남의
+> 노션에 내 공고가 섞인다(노션 통합·토큰이 공유라서 실제로 쓰기가 된다 — §8).
+> **자기 부모 페이지 아래에 `--init-db`로 새 DB를 만들고 그 ID를 쓴다.**
+> 아래 §7의 "`--init-db` 실행 금지" 주석은 **upstream 기준**이며 이 fork에는 해당하지 않는다.
 
 생성 직후 실측 스키마를 `notion_pub._schema_properties()`와 대조해 **15개 속성 전부 타입 일치,
 여분 속성 0개**를 확인했다. select 옵션도 정본과 일치한다(`Verdict` 3, `Role` 5, `Source` 2,
@@ -387,7 +396,9 @@ python -m src.pipeline --probe-detail "<목록에서 받은 상세 URL 전체>" 
 모듈 상단의 "HTML 구조 미검증" 경고를 지운다.
 
 ⚠️ 이 작업만은 **국내 IP에서 해야 한다.** 클라우드/데이터센터 IP는 work24에 닿지 않는다
-(§19의 CI ConnectTimeout과 같은 증상, 2026-09-30에 다른 환경에서도 재현됨).
+(§19의 CI ConnectTimeout과 같은 증상으로 보이나 **원인은 미확정**이다. 2026-09-30에
+다른 클라우드 환경에서 난 403은 그 환경 자신의 이그레스 정책 거부이므로 §19 가설의
+증거가 아니다 — work24는 그 요청을 본 적조차 없다).
 
 ### (1) P1 — 소스 필드 확정 ★최우선, 키 필요
 
@@ -704,8 +715,10 @@ limit      20   model: gemini-2.5-flash-lite
 
 ## 9. 세션 시작 체크리스트
 
-1. 이 문서(`docs/ref.md`) → `CLAUDE.md` → 필요하면 `docs/career-plan.md` 순으로 읽는다.
-2. `python -m pytest tests -q`로 95개가 초록인지 먼저 확인한다(회귀 여부 판단 기준선).
+1. **이 fork에서는 `CLAUDE.md` → `docs/career-plan.md` → 이 문서 순으로 읽는다.**
+   (아래 순서는 upstream 기준이다. `CLAUDE.md`가 목적과 기준의 정본이므로 그것이 먼저다.)
+2. `python -m pytest tests -q`로 **181개**가 초록인지 먼저 확인한다(회귀 판단 기준선).
+   upstream 기준선은 95→107이었다.
 3. 소스 클라이언트를 건드릴 참이면 **P1이 끝났는지부터** 확인한다
    (`src/sources/*.py` 상단의 "P1 미검증" 경고 주석이 남아 있으면 아직 안 끝난 것).
 4. 판정 기준(`config/rules.py`)을 바꾸면 `tests/test_rules.py`도 같이 바꾼다.
