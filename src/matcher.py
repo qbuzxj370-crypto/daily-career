@@ -20,6 +20,7 @@
 """
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from config import profile, skills
@@ -103,7 +104,11 @@ class MatchResult:
                 f" · 막는 것 {len(self.blocking)}개")
 
 
-def _state(req: Requirement, certified: set[str]) -> tuple[str, str, int]:
+LevelOf = Callable[[str], int]
+
+
+def _state(req: Requirement, certified: set[str],
+           level_of: LevelOf) -> tuple[str, str, int]:
     """한 요건의 (상태, 사유, 보유레벨).
 
     판정 순서가 의미를 갖는다.
@@ -112,8 +117,13 @@ def _state(req: Requirement, certified: set[str]) -> tuple[str, str, int]:
          것을 '실무 요구'에 부분 충족이라고 하면 갭을 과소평가한다.
       3. 레벨은 0인데 자격증이 증빙 → 부분(자격증만). **자격증은 레벨을 채우지 않는다.**
       4. 그 외 → 미충족
+
+    `level_of`는 보유 레벨을 돌려주는 함수다. 기본값은 `profile.level`이고, **ROI 계산이
+    "이 스킬을 채웠다면" 가상 프로필로 재평가하려고 이 자리를 주입한다**(`src/roi.py`).
+    전역 프로필을 임시로 변조하는 대신 함수를 갈아끼우는 이유는, 변조가 실패하면 그
+    상태가 다음 계산까지 새기 때문이다.
     """
-    have = profile.level(req.skill)
+    have = level_of(req.skill)
     if have >= req.depth:
         return MET, "", have
     if have > 0 and req.depth - have == 1:
@@ -157,6 +167,7 @@ def _score(matches: list[SkillMatch], career_gap: int | None) -> int:
 
 
 def match(requirements: list[Requirement], *, experience_text: str = "",
+          level_of: LevelOf | None = None,
           note_when_empty: str = "요건 미확인 — 상세 본문 미확보") -> MatchResult:
     """요건 목록을 내 스펙에 비춘다.
 
@@ -167,9 +178,10 @@ def match(requirements: list[Requirement], *, experience_text: str = "",
         return MatchResult(note=note_when_empty)
 
     certified = skills.certified_skills(list(profile.CERTS))
+    level_of = level_of or profile.level
     matches: list[SkillMatch] = []
     for req in requirements:
-        state, reason, have = _state(req, certified)
+        state, reason, have = _state(req, certified, level_of)
         matches.append(SkillMatch(requirement=req, state=state, reason=reason,
                                   have_level=have))
 
@@ -190,10 +202,11 @@ def match(requirements: list[Requirement], *, experience_text: str = "",
                        career_gap_years=career_gap, note=note)
 
 
-def match_detail(info, *, experience_text: str = "") -> MatchResult:
+def match_detail(info, *, experience_text: str = "",
+                 level_of: LevelOf | None = None) -> MatchResult:
     """`worknet_detail.DetailInfo` → MatchResult (요건 추출까지 한 번에)."""
     from src.requirements import from_detail
-    return match(from_detail(info), experience_text=experience_text)
+    return match(from_detail(info), experience_text=experience_text, level_of=level_of)
 
 
 def report(result: MatchResult) -> str:
