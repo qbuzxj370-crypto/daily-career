@@ -29,7 +29,9 @@ DUTY_TEXT = (
     "부가가치세 신고, 소득세 신고, 법인세 신고, 4대보험 업무"
 )
 
-# 구조는 추정, 라벨·값은 관측치.
+# 구조는 추정, **라벨·값은 실제 덤프에서 확정**(2026-10-01, K161322610010018).
+# ⚠️ 이전 판은 라벨을 `우대사항`·`근무지역`으로 적었는데 둘 다 틀렸다 —
+#    `우대사항`은 구역 제목이고, 실제 칸은 `기타 우대사항`·`지역`이다.
 DETAIL_HTML = f"""
 <html><head>
 <script>var dday = 7; var 근로자수 = '속임수';</script>
@@ -39,13 +41,13 @@ DETAIL_HTML = f"""
   <table><tbody>
     <tr><th>경력</th><td>관계없음</td><th>학력</th><td>학력무관</td></tr>
     <tr><th>임금</th><td>면접 후 결정</td></tr>
-    <tr><th>근무지역</th><td>부산 부산진구</td></tr>
+    <tr><th>지역</th><td>부산 부산진구</td></tr>
   </tbody></table>
 </div>
 <h3>모집요강</h3>
 <table><tbody>
   <tr><th>직무내용</th><td>{DUTY_TEXT}</td></tr>
-  <tr><th>우대사항</th><td>전산회계1급, 세무회계(2급)</td></tr>
+  <tr><th>기타 우대사항</th><td>전산회계1급, 세무회계(2급)</td></tr>
   <tr><th>자격면허</th><td>우대 : 전산회계1급, 세무회계(2급)</td></tr>
   <tr><th>전공</th><td>-</td></tr>
   <tr><th>컴퓨터 활용 능력</th><td>문서작성(워드프로세스 활용), 회계프로그램</td></tr>
@@ -135,12 +137,12 @@ def test_inline_label_and_value_on_one_line():
 def test_boundary_label_stops_value():
     """값으로 뽑지 않는 라벨(`기업정보`)도 구간의 끝으로는 작동한다."""
     html = ("<p>직무내용</p><p>서버 운영 업무</p>"
-            "<p>우대사항</p><p>AWS 경험</p>"
+            "<p>기타 우대사항</p><p>AWS 경험</p>"
             "<p>기업정보</p><p>주식회사 테스트</p>")
     info = parse(html)
     assert info.preferred == "AWS 경험"
     assert "주식회사" not in info.preferred
-    assert "우대사항" not in info.duty, "본문이 다음 라벨을 삼켰다"
+    assert "우대" not in info.duty, "본문이 다음 라벨을 삼켰다"
 
 
 # ---------------------------------------------------------------- 실패 규약
@@ -324,3 +326,68 @@ def test_http_get_guard_keeps_query_when_params_empty(monkeypatch):
     monkeypatch.setattr(httpx, "get", fake_get)
     base_mod.http_get("https://x.test/a?k=v", {}, timeout=5)
     assert "k=v" in captured["url"], "빈 params가 쿼리를 지웠다"
+
+
+# ------------------------------------------------- 실제 덤프에서 확정된 결함 4개
+# 출처: K161322610010018 상세 페이지 (2026-10-01). 아래 줄들은 덤프에서 전사한 것이고
+# 추측이 아니다. 네 결함 모두 `--probe-detail` 출력에서 드러났다.
+
+NB = "\xa0"   # 상세 페이지 본문은 공백을 전부 nbsp로 쓴다
+
+
+def test_tab_strip_does_not_claim_key_with_empty_value():
+    """상단 탭 띠의 라벨이 빈 값으로 키를 선점하면 실제 표가 영구히 가려진다.
+
+    이게 `우대사항`이 비어 보였던 원인이다 — 라벨이 틀린 게 아니라, 구역 이름을 나열한
+    띠가 본문보다 위에 있어서 '처음 등장만 채택'이 띠를 집었다.
+    """
+    lines = [
+        "기타 우대사항", "복리후생", "전형방법",      # ← 탭 띠. 뒤가 전부 경계라 값이 없다
+        "기타 우대사항", f"-{NB}전산활용{NB}가능자{NB}우대",
+    ]
+    assert extract(lines)["preferred"] == "- 전산활용 가능자 우대"
+
+
+def test_preferred_keeps_every_list_item():
+    """`기타 우대사항`은 한 칸에 목록으로 온다. 1줄로 끊으면 우대 요건 2/3이 사라진다."""
+    lines = [
+        "기타 우대사항",
+        f"-{NB}국가보훈대상자{NB}및{NB}장애인은{NB}관련법에{NB}의거{NB}우대",
+        f"-{NB}전산활용{NB}가능자{NB}우대",
+        f"-{NB}채용분야{NB}근무{NB}경력자{NB}우대",
+        "기타사항",
+    ]
+    got = extract(lines)["preferred"]
+    assert "전산활용" in got and "채용분야" in got, "목록 뒷줄이 잘렸다"
+
+
+def test_work_hours_comes_from_inline_form_not_help_modal():
+    """접힌 도움말 모달이 라벨 뒤에 끼어들어 값 대신 `도움말`이 잡혔다.
+
+    모달 구조를 뚫는 대신 괄호 인라인 형태를 쓴다 — 구조 변경에 덜 민감하다.
+    """
+    lines = [
+        "(주 소정근로시간: 40시간)",                     # ← 안전한 경로
+        "주 소정근로시간", "도움말", '※ "주소정근로시간" 이란', "닫기", ": 40시간",
+    ]
+    assert extract(lines)["work_hours"] == "40시간"
+
+
+def test_location_label_is_jiyeok_not_geunmujiyeok():
+    """`근무지역`이라는 문자열은 페이지에 없다. 라벨은 `지역`이다."""
+    lines = ["지역", "전북특별자치도   군산시  임피면 호원대3길 64"]
+    assert extract(lines)["location"] == "전북특별자치도 군산시 임피면 호원대3길 64"
+
+
+def test_nav_strip_jiyeokbyeol_is_not_location():
+    """`지역`은 짧아서 걱정되지만, 줄 전체가 같아야 매칭되므로 `지역별`은 안 걸린다."""
+    lines = ["지역별", "AI 일자리추천", "테마별"]
+    assert "location" not in extract(lines)
+
+
+def test_preferred_cond_is_not_fed_to_skill_matching():
+    """`우대조건`은 고용24 고정 선택지(보훈·장애인)다. 요건으로 넣으면 통계에 사람 분류가 섞인다."""
+    from src import requirements
+    info = DetailInfo(source_id="X", preferred_cond="보훈취업지원대상자")
+    assert "preferred_cond" not in requirements.from_detail.__code__.co_names
+    assert info.preferred_cond == "보훈취업지원대상자", "저장은 한다 — 매칭만 안 한다"
