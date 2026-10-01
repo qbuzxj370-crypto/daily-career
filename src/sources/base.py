@@ -188,6 +188,12 @@ def http_get(url: str, params: dict[str, Any], *, timeout: float,
     # 이유가 없다. 읽기/쓰기는 목록 HTML이 ~500KB라 넉넉히 둔다.
     limits = httpx.Timeout(timeout, connect=min(settings.HTTP_CONNECT_TIMEOUT, timeout))
 
+    # ⚠️ httpx는 params가 주어지면 URL의 쿼리를 **replace**한다. 쿼리가 든 URL에
+    # 빈 params를 넘기면 파라미터가 조용히 전부 지워진다(2026-10-01 실제 사고).
+    # 호출자가 URL에 쿼리를 담아 보냈고 params가 비어 있으면 건드리지 않는다.
+    if not params and "?" in url:
+        params = None
+
     last = ""
     reached = False   # 한 번이라도 응답 헤더를 받았는가 (429/5xx는 '닿았지만 거절')
     for attempt in range(retries + 1):

@@ -55,7 +55,7 @@ Gemini 프리스크린은 2026-08-11에 실호출로 검증됐다(138건 → 32�
 | **스펙 매칭·갭 분석(profile/skills/requirements/matcher)** | ✅ **구현 완료** | 오프라인 테스트 46건 + 백엔드/경력/공공 3케이스 시연으로 변별력 확인 |
 | **상세 페이지 파서(본문·근로자수)** | ⚠️ **라벨 관측 완료 / HTML 구조 미검증** | 실제 공고 2건의 **렌더된 화면**에서 라벨·값 확인(2026-09-30). 원본 HTML은 못 받음 → `--probe-detail` 1회 필요 (§4-20) |
 
-테스트: `python -m pytest tests -q` → **181 passed** (키 0개, 네트워크 0회).
+테스트: `python -m pytest tests -q` → **209 passed** (키 0개, 네트워크 0회).
 `test_matching 46 / test_rules 31 / test_worknet_detail 28 / test_sources 22 / test_state 14 / test_pipeline 12 / test_collect_resilience 12 / test_prescreen 9 / test_notion 7`.
 
 ### 실제로 돌려서 확인한 것
@@ -343,6 +343,37 @@ tests/                95개. rules + 오케스트레이션 불변식 중심
       바닥을 치는 것도 공고 인플레이션에 끌려가는 것이다. `test_score_discriminates_between_postings`.
     - 요건이 적은 공고는 비율이 쉽게 높아진다(공고가 부실해서지 실력이 맞아서가 아니다).
       점수를 깎지 않고 **신뢰도 경고만** 붙인다 — 깎는 것은 추측이다.
+
+22. **`http_get(url, {})`이 URL의 쿼리를 통째로 지운다 — 디버깅을 통째로 오염시킨 버그** (2026-10-01).
+    `--probe-detail`이 어떤 공고번호로도 883바이트 스텁(`구인정보를 확인할 수 없습니다`)만
+    받았다. 네트워크·차단·공고 만료·파서를 차례로 의심했고, 요청 조건 7가지(헤더 유무,
+    브라우저 전체 헤더, Referer, 세션 쿠키, POST, 세션+POST)를 계측 스크립트로 전부
+    때려 봤더니 **7가지가 모두 성공**했다. 심지어 프로젝트가 쓰는 것과 동일한 헤더로도
+    332KB가 왔다. 같은 URL·같은 헤더로 결과가 다르니 원인은 코드 경로였다.
+
+    `worknet_detail._raw()`가 `http_get(url, {})`로 불렀다. **httpx는 params가 주어지면
+    URL의 쿼리를 merge가 아니라 replace한다** — 빈 dict이므로 쿼리가 전부 지워진다.
+
+        httpx.Request("GET", ".../empDetailAuthView.do?wantedAuthNo=K…", params={})
+        → 실제 요청 ".../empDetailAuthView.do"   (파라미터 없음)
+
+    파라미터 없이 상세를 요청했으니 서버가 "구인정보를 확인할 수 없습니다"를 돌려준 것이고,
+    **HTTP 200이라 어느 계층에서도 오류로 보이지 않았다.**
+
+    두 군데를 고쳤다.
+    - `worknet_detail.split_query()` 신설 — URL을 (base, params)로 분해해 넘긴다. 그래야
+      `http_get`의 재시도·`SourceUnreachable` 규약·요청 로깅을 그대로 쓸 수 있다.
+    - `base.http_get`에 가드 — `params`가 비어 있고 URL에 `?`가 있으면 `params=None`으로
+      바꿔 쿼리를 건드리지 않는다. **다른 호출자가 같은 지뢰를 다시 밟지 않게** 하는 것이
+      목적이다. 호출 지점만 고치면 다음 소스를 추가할 때 재발한다.
+
+    `test_raw_does_not_lose_query_parameters`와 `test_http_get_guard_keeps_query_when_params_empty`가
+    둘을 각각 고정한다.
+
+    ⚠️ **교훈: HTTP 200 + 짧은 본문은 "요청이 잘못 조립됐다"를 먼저 의심할 것.** 차단이면
+    403/타임아웃이 나고, 구조 변경이면 본문이 길다. 883바이트짜리 200은 서버가 정상적으로
+    "그런 데이터 없다"고 답한 것이다 — 즉 보낸 요청이 내가 의도한 요청이 아니었다는 뜻이다.
+    이 구분을 못 해서 외부 원인 7개를 먼저 조사했다.
 
 19-1. **부분 실패는 조용하다 — 이건 아직 안 고쳤다.** 한 소스가 죽어도 나머지로 발행되므로
     (`collector.collect`), 2026-W35는 사람인만 실린 채 발행되고 `CollectedWeek`가 찍혔다.

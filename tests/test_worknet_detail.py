@@ -17,7 +17,8 @@ import pytest
 
 from src.sources.base import JobPosting, SourceError, SourceUnreachable
 from src.sources.worknet_detail import (
-    DetailInfo, WorknetDetailSource, detail_url, extract, parse, to_lines,
+    DetailInfo, WorknetDetailSource, detail_url, extract, parse, split_query,
+    to_lines,
 )
 
 # 관측된 본문 원문(K130042609300051). **`경력직`이 들어 있는 것이 중요하다** —
@@ -257,3 +258,69 @@ def test_enrich_survives_individual_failure(monkeypatch):
 
 def test_extract_returns_empty_for_no_lines():
     assert extract([]) == {}
+
+
+# ============================================================ 쿼리 보존 (회귀)
+
+def test_split_query_separates_base_and_params():
+    base, params = split_query(
+        "https://www.work24.go.kr/wk/a/b/1500/empDetailAuthView.do"
+        "?wantedAuthNo=K1&infoTypeCd=VALIDATION&infoTypeGroup=tb_x")
+    assert base == "https://www.work24.go.kr/wk/a/b/1500/empDetailAuthView.do"
+    assert params == {"wantedAuthNo": "K1", "infoTypeCd": "VALIDATION",
+                      "infoTypeGroup": "tb_x"}
+
+
+def test_split_query_handles_url_without_query():
+    base, params = split_query("https://x.test/a/b")
+    assert base == "https://x.test/a/b" and params == {}
+
+
+def test_raw_does_not_lose_query_parameters(monkeypatch):
+    """★`http_get(url, {})`은 URL의 쿼리를 통째로 지운다 — 실제로 났던 사고다.
+
+    httpx는 params가 주어지면 merge가 아니라 **replace**한다. 빈 dict을 넘기면
+    `wantedAuthNo`가 사라지고, work24는 200으로 883바이트 스텁
+    (`구인정보를 확인할 수 없습니다`)을 돌려준다. 네트워크·차단·파서 어디를 봐도
+    원인이 안 보여서 요청 조건 7가지를 전부 실패로 오판했다.
+
+    이 테스트는 `_raw`가 넘기는 (base, params)에 공고번호가 **살아 있는지**를 고정한다.
+    """
+    seen = {}
+
+    def fake_http_get(url, params, **kw):
+        seen["url"] = url
+        seen["params"] = params
+        return "text/html", DETAIL_HTML
+
+    monkeypatch.setattr("src.sources.worknet_detail.http_get", fake_http_get)
+    monkeypatch.setattr("src.sources.worknet_detail._throttle", lambda *a: 0.0)
+
+    src = WorknetDetailSource()
+    src.fetch_one("K161322610010018")
+
+    assert "?" not in seen["url"], "쿼리는 params로 넘겨야 한다"
+    assert seen["params"]["wantedAuthNo"] == "K161322610010018"
+    assert seen["params"]["infoTypeCd"] == "VALIDATION"
+
+
+def test_http_get_guard_keeps_query_when_params_empty(monkeypatch):
+    """`base.http_get`도 같은 지뢰를 막는다 — 다른 호출자가 다시 밟지 않도록."""
+    import httpx
+
+    from src.sources import base as base_mod
+
+    captured = {}
+
+    class FakeResp:
+        status_code = 200
+        headers = {"content-type": "text/html"}
+        text = "ok"
+
+    def fake_get(url, params=None, **kw):
+        captured["url"] = str(httpx.Request("GET", url, params=params).url)
+        return FakeResp()
+
+    monkeypatch.setattr(httpx, "get", fake_get)
+    base_mod.http_get("https://x.test/a?k=v", {}, timeout=5)
+    assert "k=v" in captured["url"], "빈 params가 쿼리를 지웠다"

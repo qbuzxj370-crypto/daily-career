@@ -327,6 +327,29 @@ def parse(body: str, source_id: str = "", url: str = "") -> DetailInfo:
     return info
 
 
+def split_query(url: str) -> tuple[str, dict[str, str]]:
+    """`...do?a=1&b=2` → (`...do`, {"a": "1", "b": "2"}).
+
+    ⚠️ **이 분해가 없으면 요청이 조용히 깨진다 (2026-10-01 실제 발생).**
+    `http_get(url, {})`처럼 쿼리가 든 URL에 빈 params를 넘기면, httpx는 params를
+    **merge가 아니라 replace**로 처리해서 **URL의 쿼리스트링을 전부 지운다.**
+
+        httpx.Request("GET", ".../empDetailAuthView.do?wantedAuthNo=K…", params={})
+        → 실제 요청 ".../empDetailAuthView.do"   (파라미터 없음)
+
+    그러면 work24는 HTTP 200으로 883바이트짜리 스텁
+    (`구인정보를 확인할 수 없습니다`)을 돌려주므로, 네트워크·차단·파서 어디를 봐도
+    원인이 안 보인다. 요청 조건 7가지를 전부 실패로 오판하게 만든 버그였다.
+
+    중복 키는 잃지만 상세 URL의 파라미터(`wantedAuthNo`·`infoTypeCd`·`infoTypeGroup`)에
+    중복이 없어 무해하다.
+    """
+    from urllib.parse import parse_qsl, urlsplit
+    parts = urlsplit(url)
+    base = f"{parts.scheme}://{parts.netloc}{parts.path}" if parts.scheme else parts.path
+    return base, dict(parse_qsl(parts.query))
+
+
 def detail_url(source_id: str, info_type_cd: str = "", info_type_group: str = "") -> str:
     """공고번호로 상세 URL 조립. **목록이 준 href가 있으면 그것을 쓸 것.**"""
     from urllib.parse import urlencode
@@ -354,8 +377,9 @@ class WorknetDetailSource:
         # 목록과 **같은 전역 간격**을 쓴다(`worknet._throttle`). 상세는 공고 1건당 1요청이라
         # 목록보다 요청 수가 훨씬 많으므로, 간격을 건너뛰면 여기서 버스트가 난다.
         _throttle()
+        base, params = split_query(url)
         _ctype, body = http_get(
-            url, {}, timeout=self.timeout,
+            base, params, timeout=self.timeout,
             headers={"User-Agent": USER_AGENT,
                      "Accept": "text/html,application/xhtml+xml"},
         )
