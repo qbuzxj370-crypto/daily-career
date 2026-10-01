@@ -7,9 +7,14 @@
 
 ## 설치
 
+**→ 처음이면 [`SETUP.md`](SETUP.md)를 따라간다.** 순서에 의미가 있다 — 성립 조건 두 개
+(수집 가능한가 / 상세 본문이 오는가)가 **키 없이** 확인되므로, 키 발급보다 먼저 한다.
+
 ```bash
+python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env      # 키 채우기
+python -m pytest tests -q # 205 passed 가 기준선
 ```
 
 ## 명령

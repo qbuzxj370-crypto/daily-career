@@ -1,0 +1,76 @@
+# work24가 GitHub Actions 러너 IP에서 응답하는지 확인하는 **진단 전용** 워크플로.
+#
+# 왜 필요한가: upstream(docs/upstream/ref.md §19)에서 CI 실행이 ConnectTimeout으로 죽었고
+# 원인이 미확정이다. 가설은 (a) WAF의 데이터센터 IP 대역 차단, (b) 버스트 차단.
+# (a)가 참이면 이 프로젝트의 매일 수집은 매일 실패한다 — 12주짜리 설계를 2분으로 검증한다.
+#
+# 스케줄이 없다. 수동(Actions 탭 → Run workflow)으로만 돈다.
+name: probe-work24 (diagnostic)
+
+on:
+  workflow_dispatch:
+    inputs:
+      repeat:
+        description: "연속 호출 횟수 (버스트 차단 가설 확인용)"
+        default: "3"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.14"
+
+      - run: pip install --quiet httpx
+
+      - name: work24 목록 페이지 호출
+        env:
+          REPEAT: ${{ github.event.inputs.repeat }}
+        run: |
+          python - <<'PY'
+          import os, time, httpx
+
+          URL = "https://www.work24.go.kr/wk/a/b/1200/retriveDtlEmpSrchList.do"
+          PARAMS = {
+              "srcKeyword": "백엔드", "searchMode": "Y", "resultCnt": 10,
+              "currentPageNo": 1, "sortField": "DATE", "sortOrderBy": "DESC",
+              "siteClcd": "all",
+          }
+          UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36")
+
+          n = int(os.environ.get("REPEAT") or 3)
+          ok = fail = 0
+          for i in range(1, n + 1):
+              t0 = time.monotonic()
+              try:
+                  r = httpx.get(URL, params=PARAMS,
+                                timeout=httpx.Timeout(15, connect=8),
+                                headers={"User-Agent": UA,
+                                         "Accept": "text/html,application/xhtml+xml"},
+                                follow_redirects=True)
+                  has_total = "totalRecordCount" in r.text
+                  print(f"[{i}/{n}] STATUS {r.status_code} "
+                        f"LEN {len(r.text):,} totalRecordCount={has_total} "
+                        f"({time.monotonic()-t0:.1f}s)")
+                  ok += 1 if (r.status_code == 200 and has_total) else 0
+              except Exception as e:
+                  fail += 1
+                  print(f"[{i}/{n}] FAIL {type(e).__name__}: {e} "
+                        f"({time.monotonic()-t0:.1f}s)")
+              time.sleep(1)
+
+          print()
+          print("=" * 60)
+          if ok == n:
+              print("✅ 전부 성공 — 러너 IP 차단 없음. Actions 수집 계획 그대로 진행.")
+          elif fail == n:
+              print("⛔ 전부 실패 — 가설 (a) 러너 IP 차단 쪽이다.")
+              print("   → self-hosted runner(국내 IP) 또는 로컬 cron으로 전환 검토.")
+          else:
+              print(f"⚠️ 일부만 실패 ({ok} 성공 / {fail} 실패) — 가설 (b) 버스트 차단 쪽이다.")
+              print("   → WORKNET_REQUEST_GAP을 올리면 해소될 가능성이 크다.")
+          print("=" * 60)
+          PY
