@@ -18,7 +18,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from config import skills
 
@@ -63,16 +63,45 @@ KIND_PREFERRED = "우대"
 
 @dataclass(frozen=True)
 class Requirement:
-    """요건 1건. `skill`은 `config/skills.py`의 정본 이름이다."""
+    """요건 1건. `skill`은 `config/skills.py`의 정본 이름이다.
+
+    ⚠️ **kind가 둘이다. 하나로 합치지 않는다** (사용자 결정, 2026-10-01).
+
+    같은 스킬이 본문과 `기타 우대사항`에 모두 나오는 일이 흔한데, 그때 두 층이 서로
+    **반대 방향**을 요구한다.
+
+      개인층  갭을 과소평가하면 안 된다 → 보수적으로 **필수**로 본다
+      통계층  "필수 11% / 우대 38%"가 존재 이유다 → 공고가 **우대라고 적었으면 우대**다
+
+    한 숫자로 합치면 둘 중 하나가 반드시 깨진다. 실제로 합쳐 본 결과, 공고가 우대라고
+    명시한 Docker·AWS가 필수로 기록되고 **우대 필드가 아무것도 기여하지 못했다** —
+    본문에 언급만 되면 구조화된 선언이 통째로 버려졌다.
+
+    그래서 둘 다 남긴다. `kind`는 보수적 병합값(개인층), `stat_kind`는 공고의 명시를
+    존중한 값(통계층)이다. §10-14에서 `is_implied`를 분리 저장하고 "명시 %/필요 %"를
+    둘 다 보고하기로 한 것과 같은 모양이다.
+    """
     skill: str
-    kind: str          # KIND_REQUIRED | KIND_PREFERRED
+    kind: str          # KIND_REQUIRED | KIND_PREFERRED. **개인층이 쓴다**
     depth: int         # DEPTH_*
     field: str         # 어느 항목에서 나왔나 (duty / preferred / license / …)
     evidence: str      # 근거가 된 절. **판정을 사람이 검증할 수 있어야 한다**
+    declared_preferred: bool = False   # 공고가 우대라고 **명시**한 적이 있다
+    sources: tuple[str, ...] = ()      # 나온 항목 전부(병합 전 출처). 비면 (field,)
 
     @property
     def is_required(self) -> bool:
         return self.kind == KIND_REQUIRED
+
+    @property
+    def stat_kind(self) -> str:
+        """**통계층이 쓰는 kind.** 공고가 우대라고 적었으면 우대다.
+
+        `kind`와 다를 수 있고, 다른 것이 정상이다. 통계에서 `kind`를 쓰면 필수가
+        체계적으로 부풀려진다 — 본문은 기본값이 필수인데 그건 추정이지 공고의 선언이
+        아니기 때문이다.
+        """
+        return KIND_PREFERRED if self.declared_preferred else self.kind
 
     def label(self) -> str:
         return f"{self.skill}({DEPTH_NAMES.get(self.depth, '?')}·{self.kind})"
@@ -119,26 +148,40 @@ def required_years(text: str) -> int | None:
     return int(m.group(1))
 
 
-def _extract(text: str, field: str, *, default_kind: str) -> list[Requirement]:
+def _extract(text: str, field: str, *, default_kind: str,
+             declares_preferred: bool = False) -> list[Requirement]:
+    """항목 하나에서 요건을 뽑는다.
+
+    `declares_preferred`는 **그 항목 자체가 우대 선언인가**를 뜻한다. `기타 우대사항`
+    칸은 그렇고, `자격 면허`는 아니다 — 후자의 `default_kind=우대`는 upstream의 추정이지
+    공고의 선언이 아니다. 이 구분이 `stat_kind`의 근거다.
+    """
     out: list[Requirement] = []
     for clause in clauses(text):
         found = skills.find_skills(clause)
         if not found:
             continue
-        kind = KIND_PREFERRED if is_preferred_clause(clause) else default_kind
+        cued = is_preferred_clause(clause)
+        kind = KIND_PREFERRED if cued else default_kind
         depth = depth_of(clause)
         evidence = clause if len(clause) <= 120 else clause[:120] + "…"
         for skill in found:
             out.append(Requirement(skill=skill, kind=kind, depth=depth,
-                                   field=field, evidence=evidence))
+                                   field=field, evidence=evidence,
+                                   declared_preferred=declares_preferred or cued,
+                                   sources=(field,)))
     return out
 
 
 def _dedupe(items: list[Requirement]) -> list[Requirement]:
-    """스킬당 1건으로 줄인다. **필수가 우대를 이기고, 깊은 쪽이 얕은 쪽을 이긴다.**
+    """스킬당 1건으로 줄인다. **`kind`는 필수가 이기고, 명시 우대는 따로 보존한다.**
 
-    같은 스킬이 본문과 우대사항에 모두 있으면 필수로 남겨야 한다 — 우대로 낮추면 갭이
-    과소평가되고, 이 도구의 실패 방향은 '갭을 작게 보는 것'이다.
+    `kind`: 필수 > 우대, 같은 kind면 깊은 쪽. 개인층의 기준이고 — 우대로 낮추면 갭이
+    과소평가되는데 이 도구의 실패 방향은 '갭을 작게 보는 것'이다.
+
+    `declared_preferred`: 하나라도 명시 우대였으면 남긴다. **병합이 지우지 않는다.**
+    예전에는 이게 없어서, 공고가 `기타 우대사항`에 적은 선언이 본문 언급 하나에
+    덮여 사라졌다. 통계층이 그걸 필수로 세면 "필수 11%"가 거짓이 된다.
     """
     best: dict[str, Requirement] = {}
     for item in items:
@@ -147,8 +190,14 @@ def _dedupe(items: list[Requirement]) -> list[Requirement]:
             best[item.skill] = item
             continue
         # 필수 > 우대, 같은 kind면 깊은 쪽
-        if (prev.is_required, prev.depth) < (item.is_required, item.depth):
-            best[item.skill] = item
+        winner, loser = ((item, prev)
+                         if (prev.is_required, prev.depth) < (item.is_required, item.depth)
+                         else (prev, item))
+        best[item.skill] = replace(
+            winner,
+            declared_preferred=prev.declared_preferred or item.declared_preferred,
+            sources=tuple(dict.fromkeys(winner.sources + loser.sources)),
+        )
     return [best[s] for s in skills.ALL_SKILLS if s in best]
 
 
@@ -161,7 +210,8 @@ def from_texts(duty: str = "", preferred: str = "", license_: str = "",
     """
     items: list[Requirement] = []
     items += _extract(duty, "duty", default_kind=KIND_REQUIRED)
-    items += _extract(preferred, "preferred", default_kind=KIND_PREFERRED)
+    items += _extract(preferred, "preferred", default_kind=KIND_PREFERRED,
+                  declares_preferred=True)
     items += _extract(license_, "license", default_kind=KIND_PREFERRED)
     items += _extract(computer_skill, "computer_skill", default_kind=KIND_REQUIRED)
     return _dedupe(items + _expand_implied(items))
@@ -179,7 +229,11 @@ def _expand_implied(items: list[Requirement]) -> list[Requirement]:
         for skill in skills.implied(item.skill):
             out.append(Requirement(
                 skill=skill, kind=item.kind, depth=item.depth, field=item.field,
-                evidence=f"{item.skill} 요구에 포함 ({item.evidence})"))
+                evidence=f"{item.skill} 요구에 포함 ({item.evidence})",
+                # 명시 우대도 함께 물려받는다. `Spring Boot 우대`에서 끌어온 `Java`를
+                # 통계가 필수로 세면, 원 요건에서 지운 왜곡이 함의 경로로 되살아난다.
+                declared_preferred=item.declared_preferred,
+                sources=item.sources))
     return out
 
 

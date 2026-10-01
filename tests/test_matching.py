@@ -347,3 +347,63 @@ def test_matcher_does_not_touch_rules_or_evaluator():
     assert "config.rules" not in source
     assert "import rules" not in source
     assert "evaluator" not in source.split('"""', 2)[2]   # 독스트링 언급은 허용
+
+
+# ------------------------------------------------- kind는 둘이다 (사용자 결정 2026-10-01)
+# 개인층과 통계층이 서로 반대를 요구하므로 한 숫자로 합치지 않는다.
+#   kind       보수적 병합 — 갭을 과소평가하지 않는다 (개인층)
+#   stat_kind  공고의 명시를 존중 — "필수 11% / 우대 38%"를 지킨다 (통계층)
+
+MIXED_DUTY = ("■ 수행업무\n- REST API 설계 및 개발\n"
+              "■ 자격요건 및 우대사항\n"
+              "- Java, Spring Boot 기반 서버 개발\n"
+              "- Docker 환경에서의 배포 경험")
+MIXED_PREFERRED = "- Docker 경험자 우대"
+
+
+def _by_skill(reqs):
+    return {r.skill: r for r in reqs}
+
+
+def test_declared_preferred_survives_the_merge():
+    """공고가 우대라고 적은 것이 본문 언급에 덮여 사라지면 안 된다.
+
+    예전에는 `_dedupe`가 필수를 남기면서 우대 선언을 통째로 버렸다 — 그 상태로 통계를
+    내면 공고가 우대로 적은 것이 필수로 집계된다.
+    """
+    got = _by_skill(reqs.from_texts(duty=MIXED_DUTY, preferred=MIXED_PREFERRED))
+    assert got["Docker"].declared_preferred is True
+    assert set(got["Docker"].sources) == {"duty", "preferred"}
+
+
+def test_two_kinds_disagree_and_that_is_correct():
+    got = _by_skill(reqs.from_texts(duty=MIXED_DUTY, preferred=MIXED_PREFERRED))
+    assert got["Docker"].kind == reqs.KIND_REQUIRED, "개인층은 보수적이어야 한다"
+    assert got["Docker"].stat_kind == reqs.KIND_PREFERRED, "통계층은 명시를 따른다"
+    # 본문에만 있는 스킬은 둘이 같다 — 분기는 '명시 우대가 있었을 때'만 생긴다
+    assert got["Java"].kind == got["Java"].stat_kind == reqs.KIND_REQUIRED
+
+
+def test_personal_layer_is_unchanged_by_the_split():
+    """`kind`를 안 건드렸으므로 적합도·갭은 예전과 똑같이 나와야 한다."""
+    items = reqs.from_texts(duty=MIXED_DUTY, preferred=MIXED_PREFERRED)
+    assert all(r.is_required == (r.kind == reqs.KIND_REQUIRED) for r in items)
+    assert _by_skill(items)["Docker"].is_required is True
+
+
+def test_implied_requirement_inherits_the_declaration():
+    """`Spring Boot 우대`에서 끌어온 `Java`를 통계가 필수로 세면 왜곡이 되살아난다."""
+    got = _by_skill(reqs.from_texts(preferred="- Spring Boot 경험자 우대"))
+    assert got["Java"].declared_preferred is True
+    assert got["Java"].stat_kind == reqs.KIND_PREFERRED
+
+
+def test_license_default_is_inference_not_declaration():
+    """`자격 면허` 항목의 기본값 우대는 upstream의 추정이지 공고의 선언이 아니다.
+
+    이걸 선언으로 세면 통계가 반대쪽으로 틀어진다 — 우대를 과대 집계한다.
+    """
+    got = _by_skill(reqs.from_texts(license_="정보처리산업기사"))
+    if got:
+        r = next(iter(got.values()))
+        assert r.declared_preferred is False, "추정을 명시로 승격하지 말 것"
