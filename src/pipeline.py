@@ -272,6 +272,59 @@ def run_probe(source_name: str, role_slug: str, log=print) -> int:
     return 0
 
 
+
+def run_audit(role_slug: str, per_keyword: int = 5, log=print) -> int:
+    """직군 모집단 감사 — **검색어별로 무엇이 들어오는지 재기만 한다.**
+
+    `--probe`와 다른 점이 둘이다.
+      ① `keywords(slug)[0]`가 아니라 **전부** 돈다. 오염은 검색어마다 다르므로, 첫 키워드만
+         보면 나머지는 확인조차 안 된 채로 남는다.
+      ② 상세까지 받아 요건을 센다. 제목만으로는 `전산직원 채용`이 개발인지 행정인지 못 가린다.
+
+    거르지 않는다. 판정 규칙을 만들 근거(양성 예시)가 아직 없으므로, 신호를 나란히 찍어
+    사람이 보게 하는 것이 이 단계에서 할 수 있는 전부다.
+
+    ⚠️ 요청 수 = 검색어 수 × (1 + per_keyword). public_it은 7개 검색어라 기본값에서 42회다.
+    `_throttle`이 간격을 지키지만 한 번에 돌리는 양이므로, 늘릴 때는 §4-6(러너 IP·버스트
+    차단 가설)을 염두에 둘 것.
+    """
+    from src import audit as audit_mod
+    from src.sources.worknet import WorknetSource
+    from src.sources.worknet_detail import WorknetDetailSource
+
+    if role_slug not in roles.ROLES:
+        log(f"알 수 없는 직군: {role_slug} ({', '.join(roles.SLUGS)})")
+        return 2
+
+    listing, detail_src = WorknetSource(), WorknetDetailSource()
+    result = audit_mod.Audit(role=role_slug)
+    seen: set[str] = set()
+
+    for keyword in roles.keywords(role_slug):
+        try:
+            found = listing.fetch(keyword, role_slug, per_keyword)
+        except SourceError as e:
+            log(f"  [경고] '{keyword}' 목록 실패: {e}")
+            continue
+        log(f"  {keyword:<16} {len(found)}건")
+        for posting in found:
+            if posting.source_id in seen:
+                continue          # 검색어끼리 겹친다. 중복은 모집단을 부풀린다
+            seen.add(posting.source_id)
+            try:
+                _ext, body, _url = detail_src.probe(posting.url or posting.source_id)
+                from src.sources.worknet_detail import parse as parse_detail
+                info = parse_detail(body, posting.source_id)
+            except (SourceError, Exception) as e:   # 상세 실패는 '요건 없음'과 다르다
+                log(f"    [경고] {posting.source_id} 상세 실패: {type(e).__name__}")
+                info = None
+            result.rows.append(audit_mod.row_for(posting, info, keyword=keyword))
+
+    log("")
+    log(audit_mod.report(result))
+    return 0
+
+
 def run_probe_detail(target: str, log=print) -> int:
     """P1(상세): 공고 1건의 상세 페이지 원본을 덤프하고 추출 결과를 보여준다.
 
@@ -352,6 +405,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--init-db", action="store_true", help="Notion DB를 스키마대로 생성(최초 1회)")
     p.add_argument("--parent-page", default=None,
                    help="--init-db: DB를 만들 부모 페이지 id(통합에 공유 필요)")
+    p.add_argument("--audit", metavar="ROLE", default=None,
+                   help="직군 모집단 감사 — 검색어별로 뭐가 들어오는지 잰다(거르지 않음)")
+    p.add_argument("--audit-limit", type=int, default=5,
+                   help="--audit에서 검색어당 받을 공고 수(기본 5). 요청 수가 비례해 는다")
     p.add_argument("--role", default=None, help="직무 slug 고정(미지정 시 전체)")
     p.add_argument("--week", default=None, help="ISO 주차 고정(기본: 이번 주 KST)")
     args = p.parse_args(argv)
@@ -384,6 +441,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.probe:
         return run_probe(args.probe, args.role or "cloud")
+
+    if args.audit:
+        return run_audit(args.audit, args.audit_limit)
 
     if args.probe_detail:
         return run_probe_detail(args.probe_detail)

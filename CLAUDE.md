@@ -64,6 +64,29 @@
 
 ---
 
+## 모집단이 먼저다 — 축이 셋이다
+
+| 축 | 정본 | 묻는 것 | 출력 |
+|---|---|---|---|
+| **직군 소속** | `config/roles.py` | 이게 그 직군의 공고인가 | 모집단 포함 여부 |
+| **스펙 적합도** | `config/profile.py` | 내가 지원할 수 있나 | `FitScore` 1~5 + 갭 목록 |
+| **기피 조건** | `config/rules.py` | 가고 싶은 자리인가 | `Verdict` 적합/보통/위험 |
+
+첫 줄이 **선별이 아니라 모집단 정의**다. "통계는 전량에서 뽑는다"는 *적합도로 미리 거르지
+말라*는 뜻이고, **모집단이 올바르게 정의돼 있음을 전제한다.** 지금은 모집단이 "work24
+검색이 돌려준 것 전부"이고 거기에 행정직이 섞인다 — 검색어 `전산직`이 공고 본문의
+`전산활용 가능자 우대`에 걸려 호원대 학사교직지원팀을 물어왔다(2026-10-01 실측).
+
+**실패 방향이 갭 분석과 반대다.** 갭은 과소평가하지 않는 쪽이 안전하지만, 모집단은
+**느슨한 쪽이 위험하다** — 엄격해서 놓치면 표본 수가 줄어 눈에 보이고, 느슨해서 섞이면
+"백엔드 공고의 38%"의 분모가 조용히 부풀어 모든 비율이 희석된다.
+
+⚠️ **판정 규칙은 아직 없다.** 음성 예시 2건(둘 다 같은 대학)만 있고 **양성 예시가 0건**이라
+문턱을 정할 근거가 없다. `python -m src.pipeline --audit <role>`이 검색어별로 신호를 재서
+찍는다 — **거르지 않는다.** 규칙은 그 출력이 쌓인 다음에 만든다.
+
+---
+
 ## 절대 섞지 않는 두 축
 
 | 축 | 정본 | 묻는 것 | 출력 |
@@ -225,6 +248,7 @@ work24 통합검색(`/cm/f/c/0100/selectUnifySearchPost.do`)은 **명시적 금�
 python -m src.pipeline --mock                    # 키 없이 전 경로 검증(오프라인)
 python -m src.pipeline --probe worknet --role backend   # ← P1 이후
 python -m src.pipeline --probe-detail <공고번호>  # 상세 라벨 확정 (P0). role 불필요
+python -m src.pipeline --audit public_it         # 직군 모집단 감사 (검색어별 오염 측정)
 python -m src.pipeline --dry-run --no-llm        # 실제 수집 + 규칙·갭만 (LLM 비용 0)
 python -m src.pipeline --dry-run                 # + LLM 판정, 노션 미발행
 python -m src.pipeline --init-db --parent-page <ID>
